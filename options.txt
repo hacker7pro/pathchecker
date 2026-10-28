@@ -1,0 +1,160 @@
+tos_list  = [0x00, 0xB8, 0x88, 0xC0, 0xE0]
+ttl_list  = [1, 2, 3, 5, 8, 10, 15, 32, 64, 128, 255]
+
+# IP Options array
+ip_options_list = {
+    "NoOption":  [],
+    "RR":        [IPOption_RR()],
+    "NOP":       [IPOption_NOP()],
+    "Timestamp": [IPOption_Timestamp()],
+    "LSRR":      [IPOption_LSRR(routers=["8.8.8.8"])],
+    "SSRR":      [IPOption_SSRR(routers=["8.8.8.8"])],
+} - 
+
+
+மிக முக்கியமான மதிப்புகள் (Penetration Testing / Network Analysis context-ல்):
+
+Value	யாருக்கு
+0	Default — எல்லா சாதாரண traffic-உம்
+46 (EF)	VoIP calls — highest priority
+48 (CS6)	BGP/OSPF routing protocols
+40 (CS5)	Voice bearer (RTP audio)
+34–38 (AF4x)	Video conferencing
+
+
+================================================================
+       IP LAYER - TYPE OF SERVICE (ToS) VALUES - FULL LIST
+       IP அடுக்கு - சேவை வகை (ToS) மதிப்புகள் - முழு பட்டியல்
+================================================================
+
+FORMAT: Decimal | Hex  | Binary   | DSCP/Class | Use / பயன்பாடு
+----------------------------------------------------------------
+
+0   | 0x00 | 00000000 | Default / BE (Best Effort)
+    Use : Normal traffic — no priority
+    பயன் : சாதாரண தரவு. எந்த priority-உம் இல்லாத default traffic.
+           உதா: Web browsing, Email.
+
+8   | 0x08 | 00001000 | CS1 (Class Selector 1 — Scavenger)
+    Use : Low priority / background traffic
+    பயன் : குறைந்த முன்னுரிமை. Background transfers, bulk downloads,
+           file sync, OS updates. Network idle time-ல் மட்டும் அனுப்பப்படும்.
+
+10  | 0x0A | 00001010 | AF11 (Assured Forwarding 1-1 — Low Drop)
+    Use : Class 1 traffic, low drop probability
+    பயன் : குறைந்த drop probability. Large file transfers, background data sync.
+
+12  | 0x0C | 00001100 | AF12 (Assured Forwarding 1-2 — Medium Drop)
+    Use : Class 1 traffic, medium drop probability
+    பயன் : நடுத்தர drop probability. Bulk data with occasional congestion tolerance.
+
+14  | 0x0E | 00001110 | AF13 (Assured Forwarding 1-3 — High Drop)
+    Use : Class 1 traffic, high drop probability
+    பயன் : அதிக drop probability. Congestion-ல் முதலில் drop ஆகும். Background traffic.
+
+16  | 0x10 | 00010000 | CS2 (Class Selector 2 — Network Operations)
+    Use : Network management / OAM traffic
+    பயன் : நெட்வொர்க் நடத்தை. OAM, SNMP, SSH management sessions.
+
+18  | 0x12 | 00010010 | AF21 (Assured Forwarding 2-1 — Low Drop)
+    Use : Transactional data, low drop
+    பயன் : Transaction data, interactive applications. Database queries, ERP traffic.
+
+20  | 0x14 | 00010100 | AF22 (Assured Forwarding 2-2 — Medium Drop)
+    Use : Transactional data, medium drop
+    பயன் : Transaction-based business apps with medium congestion sensitivity.
+
+22  | 0x16 | 00010110 | AF23 (Assured Forwarding 2-3 — High Drop)
+    Use : Transactional data, high drop
+    பயன் : Low-priority transactional apps. Congestion-ல் drop ஆகலாம்.
+
+24  | 0x18 | 00011000 | CS3 (Class Selector 3 — Signaling)
+    Use : Call signaling protocols
+    பயன் : ஒலி/காணொலி சமிக்ஞை. SIP, H.323, SCCP — voice/video call setup messages.
+
+26  | 0x1A | 00011010 | AF31 (Assured Forwarding 3-1 — Low Drop)
+    Use : Multimedia streaming, low drop
+    பயன் : Multimedia streaming, video conferencing data (non-real-time).
+           Netflix போன்ற adaptive streaming.
+
+28  | 0x1C | 00011100 | AF32 (Assured Forwarding 3-2 — Medium Drop)
+    Use : Multimedia, medium drop
+    பயன் : Multimedia applications with medium quality needs.
+
+30  | 0x1E | 00011110 | AF33 (Assured Forwarding 3-3 — High Drop)
+    Use : Multimedia, high drop
+    பயன் : Bulk multimedia. Congestion-ல் quality கொஞ்சம் குறையலாம்.
+
+32  | 0x20 | 00100000 | CS4 (Class Selector 4 — Real-time / Broadcast Video)
+    Use : Broadcast-quality video streaming
+    பயன் : IPTV, live video feeds. High bandwidth, low latency தேவை.
+
+34  | 0x22 | 00100010 | AF41 (Assured Forwarding 4-1 — Low Drop)
+    Use : Interactive video, low drop
+    பயன் : Real-time interactive video. Zoom, WebEx video conferencing.
+           குறைந்த jitter தேவை.
+
+36  | 0x24 | 00100100 | AF42 (Assured Forwarding 4-2 — Medium Drop)
+    Use : Interactive video, medium drop
+    பயன் : Interactive video with some drop tolerance. Video calls under mild congestion.
+
+38  | 0x26 | 00100110 | AF43 (Assured Forwarding 4-3 — High Drop)
+    Use : Interactive video, high drop
+    பயன் : Video apps that can tolerate occasional drops. Low-quality video streams.
+
+40  | 0x28 | 00101000 | CS5 (Class Selector 5 — Voice Bearer)
+    Use : VoIP audio (RTP/RTCP streams)
+    பயன் : ஒலி தரவு. Voice over IP actual audio packets.
+           மிகவும் latency-sensitive.
+
+46  | 0x2E | 00101110 | EF (Expedited Forwarding) *** HIGHEST PRIORITY ***
+    Use : VoIP voice calls — guaranteed bandwidth, lowest latency/jitter
+    பயன் : அவசர அனுப்புதல். மிக உயர்ந்த priority. VoIP voice packets.
+           Constant bandwidth, low latency, low jitter உறுதி.
+           உதா: Cisco IP Phone calls.
+
+48  | 0x30 | 00110000 | CS6 (Class Selector 6 — Network Control)
+    Use : Routing protocol packets
+    பயன் : நெட்வொர்க் கட்டுப்பாடு. OSPF, BGP, EIGRP, IS-IS packets.
+           Network infrastructure-க்கு critical.
+
+56  | 0x38 | 00111000 | CS7 (Class Selector 7 — Highest Network Control)
+    Use : Spanning Tree, critical infrastructure protocols
+    பயன் : உயர்நிலை நெட்வொர்க் கட்டுப்பாடு. STP, critical network internals.
+           பொதுவாக user traffic-க்கு பயன்படாது.
+
+================================================================
+  ToS FIELD BIT STRUCTURE (8 bits)
+  [ DSCP - 6 bits ] [ ECN - 2 bits ]
+
+  DSCP = Differentiated Services Code Point
+  ECN  = Explicit Congestion Notification
+         00 = ECN not supported
+         01 = ECN capable (ECT1)
+         10 = ECN capable (ECT0)
+         11 = Congestion Experienced (CE)
+
+================================================================
+  QUICK REFERENCE — Priority Order (Low to High)
+  முன்னுரிமை வரிசை (குறைவு முதல் அதிகம் வரை)
+================================================================
+
+  CS1  (8)  < Default (0) < CS2 (16) < CS3 (24) <
+  AF1x (10-14) < AF2x (18-22) < AF3x (26-30) < AF4x (34-38) <
+  CS4 (32) < CS5 (40) < CS6 (48) < CS7 (56) < EF (46)*
+
+  * EF (46) is treated as highest-priority user traffic class.
+    CS6/CS7 are reserved for network infrastructure only.
+
+================================================================
+  WIRESHARK FILTERS (Pentest / Analysis பயன்பாடு)
+================================================================
+
+  ip.dsfield.dscp == 46     --> VoIP (EF) packets மட்டும்
+  ip.dsfield.dscp == 48     --> Routing protocol packets
+  ip.dsfield.dscp == 40     --> Voice bearer (RTP audio)
+  ip.dsfield.dscp == 0      --> Default / unclassified traffic
+  ip.dsfield.dscp >= 34     --> All video/voice traffic
+  ip.dsfield.ecn == 3       --> Congestion experienced packets
+
+================================================================
