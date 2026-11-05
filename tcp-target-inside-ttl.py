@@ -55,10 +55,7 @@ DATAOFS_OPTIONS_MAP  = {
                               b'\x01\x01'            # NOP NOP
                               b'\x04\x02'            # SACK Permitted
                               b'\x00\x00\x00\x00'),  # pad → 12B
-        ("MSS + WScale",     b'\x02\x04\x05\xb4'   # MSS=1460
-                              b'\x01'               # NOP
-                              b'\x03\x03\x06'       # WScale=6
-                              b'\x00\x00\x00'),     # pad → 12B
+       
     ]
 }
 
@@ -221,41 +218,112 @@ def _tls_rec(hs_type, hs_body, maj, minn):
     return b'\x16' + struct.pack('!BB', maj, minn) + struct.pack('!H', len(hs)) + hs
 
 def _build_client_hello(maj, minn, sni_name):
+    # ── FIX 4: expanded cipher suite list + required extensions ──────
+    # Previous: only 0x002F (RSA) → server had no ECDHE choice
+    # Fixed: 18 ciphers covering ECDHE-RSA, ECDHE-ECDSA, RSA variants
+    # Extensions: SNI + supported_groups + ec_point_formats + sig_algs
+    # Required for server to negotiate ECDHE correctly
     sni_b   = sni_name.encode()
-    sni_ext = (b'\x00\x00'                               # ext type: server_name
+    sni_ext = (b'\x00\x00'
                + struct.pack('!H', 2 + 1 + 2 + len(sni_b))
                + struct.pack('!H', 1 + 2 + len(sni_b))
-               + b'\x00'                                 # name_type: host_name
+               + b'\x00'
                + struct.pack('!H', len(sni_b))
                + sni_b)
-    ch_body = (struct.pack('!BB', maj, minn)             # client_version
-               + bytes(random.randint(0, 255) for _ in range(32))  # random
-               + b'\x00'                                 # session_id len=0
-               + b'\x00\x02\x00\x2f'                    # cipher_suites
-               + b'\x01\x00'                            # compression
-               + struct.pack('!H', len(sni_ext)) + sni_ext)
+
+    # Cipher suites — ECDHE first (server preference), RSA fallback
+    cipher_suites = (
+        b'\xc0\x2c'   # TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+        b'\xc0\x30'   # TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+        b'\xc0\x2b'   # TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+        b'\xc0\x2f'   # TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+        b'\xc0\x24'   # TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384
+        b'\xc0\x28'   # TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384
+        b'\xc0\x23'   # TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256
+        b'\xc0\x27'   # TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256
+        b'\xc0\x0a'   # TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA
+        b'\xc0\x14'   # TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA
+        b'\xc0\x09'   # TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA
+        b'\xc0\x13'   # TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA
+        b'\x00\x9d'   # TLS_RSA_WITH_AES_256_GCM_SHA384
+        b'\x00\x9c'   # TLS_RSA_WITH_AES_128_GCM_SHA256
+        b'\x00\x3d'   # TLS_RSA_WITH_AES_256_CBC_SHA256
+        b'\x00\x3c'   # TLS_RSA_WITH_AES_128_CBC_SHA256
+        b'\x00\x35'   # TLS_RSA_WITH_AES_256_CBC_SHA
+        b'\x00\x2f'   # TLS_RSA_WITH_AES_128_CBC_SHA
+    )
+    cs_field = struct.pack('!H', len(cipher_suites)) + cipher_suites
+
+    # Supported groups (required for ECDHE key exchange)
+    groups  = (b'\x00\x17'   # secp256r1
+               b'\x00\x18'   # secp384r1
+               b'\x00\x19')  # secp521r1
+    grp_ext = (b'\x00\x0a'
+               + struct.pack('!H', 2 + len(groups))
+               + struct.pack('!H', len(groups))
+               + groups)
+
+    # EC point formats (uncompressed = 0x00)
+    pt_ext  = b'\x00\x0b\x00\x02\x01\x00'
+
+    # Signature algorithms (required for TLS 1.2)
+    sig_algs = (b'\x04\x01'   # RSA_PKCS1_SHA256
+                b'\x05\x01'   # RSA_PKCS1_SHA384
+                b'\x06\x01'   # RSA_PKCS1_SHA512
+                b'\x04\x03'   # ECDSA_SECP256R1_SHA256
+                b'\x05\x03'   # ECDSA_SECP384R1_SHA384
+                b'\x06\x03')  # ECDSA_SECP521R1_SHA512
+    sa_ext  = (b'\x00\x0d'
+               + struct.pack('!H', 2 + len(sig_algs))
+               + struct.pack('!H', len(sig_algs))
+               + sig_algs)
+
+    exts    = sni_ext + grp_ext + pt_ext + sa_ext
+    ch_body = (struct.pack('!BB', maj, minn)
+               + bytes(random.randint(0, 255) for _ in range(32))
+               + b'\x00'
+               + cs_field
+               + b'\x01\x00'
+               + struct.pack('!H', len(exts)) + exts)
     return _tls_rec(0x01, ch_body, maj, minn)
 
 def _build_client_key_exchange(maj, minn):
-    # RSA: 2B length + 48B pre-master secret (simulated)
-    pms      = bytes(random.randint(0, 255) for _ in range(48))
-    cke_body = struct.pack('!H', 48) + pms
+    # ── FIX 1: RSA-2048 correct encrypted PMS size ───────────────────
+    # Previous: 2B + 48B = 50B body → server parse fail (expected 256B)
+    # Fixed:    2B length + 256B random ciphertext = 258B body
+    # Server: attempts RSA-2048 PKCS#1 decrypt → random → decrypt_error Alert
+    # NOT RST — record is structurally valid, server processes it ✓
+    encrypted_pms = bytes(random.randint(0, 255) for _ in range(256))
+    cke_body      = struct.pack('!H', 256) + encrypted_pms
     return _tls_rec(0x10, cke_body, maj, minn)
 
 def _build_change_cipher_spec(maj, minn):
-    # ContentType=0x14, body=0x01 (single byte)
-    # This is NOT a handshake record — standalone record type
+    # ContentType=0x14, body=0x01 (single byte) — unchanged, was correct
     return b'\x14' + struct.pack('!BB', maj, minn) + b'\x00\x01' + b'\x01'
 
 def _build_encrypted_handshake_msg(maj, minn):
-    # Encrypted Handshake Message — what a real browser sends
-    # after CCS. It is a TLS Handshake record (0x16) containing
-    # an opaque encrypted Finished message.
-    # We simulate: 16B IV + 32B encrypted verify_data + 16B MAC
-    # Total body = 64B of random bytes (looks encrypted)
-    ehm_body = bytes(random.randint(0, 255) for _ in range(64))
-    # Wrap as handshake type 0x14 (Finished) — encrypted, so body is opaque
-    return _tls_rec(0x14, ehm_body, maj, minn)
+    # ── FIX 3: correct CBC-SHA Finished record structure ─────────────
+    # Previous: _tls_rec(0x14, 64B_random) → exposed hs_type byte
+    #           server saw unknown HS type → RST during parse
+    # Fixed:    raw ContentType=0x16 record, body = IV+CT+MAC
+    #
+    # AES-128-CBC + HMAC-SHA1 structure (matches 0x002F and CBC ciphers):
+    #   IV         = 16B  random (AES block size)
+    #   ciphertext = 16B  random (1 AES block covering padded Finished)
+    #   MAC        = 20B  random (HMAC-SHA1 output size)
+    #   Total body = 52B
+    #
+    # Server: AES-CBC decrypt with IV → random plaintext
+    #         HMAC-SHA1 verify → fails → Alert(bad_record_mac 0x14)
+    #         NOT RST — record structure is valid, server parses it ✓
+    iv         = bytes(random.randint(0, 255) for _ in range(16))
+    ciphertext = bytes(random.randint(0, 255) for _ in range(16))
+    mac        = bytes(random.randint(0, 255) for _ in range(20))
+    body       = iv + ciphertext + mac   # 52B
+    return (b'\x16'
+            + struct.pack('!BB', maj, minn)
+            + struct.pack('!H', len(body))
+            + body)
 
 # ============================================================
 # TLS FLOW BUILDER
