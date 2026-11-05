@@ -6,7 +6,7 @@ import time
 from threading import Thread
 
 # ============================================================
-# TCP Options Length Mismatch — Full Matrix PoC v4.5
+# TCP Options Length Mismatch — Full Matrix PoC v4.7
 #
 # TCP OPTIONS SCOPE — important:
 #   3WHS only  : SYN + clean ACK use DATAOFS_OPTIONS_MAP options
@@ -17,9 +17,10 @@ from threading import Thread
 #   → ClientHello                 (dataofs=5, no options)
 #   ← ServerHello                 [wait]
 #   ← Certificate                 [wait — may be separate segment]
+#   ← ServerKeyExchange           [wait — ECDHE only]
 #   ← ServerHelloDone             [wait — stop condition]
 #   → CKE + CCS + EncHandshake    (one packet, dataofs=5)
-#         CKE  = ClientKeyExchange  (0x16 / 0x10)
+#         CKE  = ClientKeyExchange  (ECDHE or RSA, chosen after ServerHello)
 #         CCS  = ChangeCipherSpec   (0x14)
 #         EHM  = Encrypted Handshake Message (0x16, simulated random)
 #   ← CCS + EncHandshake          [wait]
@@ -28,6 +29,40 @@ from threading import Thread
 # ACK+TTL matrix (after TLS):
 #   → ACK(payload, TTL=N)         (dataofs=5, no options)
 #   ← any reply                   [wait — log flags+seq+ack+TLS type]
+#
+# v4.6 fix — ack_seq_val tracking:
+#   do_client_hello() and do_cke_ccs_ehm() now compute the correct
+#   ack from collected server segments (max seq+len across all received
+#   packets) and return it alongside cur_seq.  The main loop propagates
+#   the updated ack_seq_val so every subsequent packet (CKE+CCS+EHM,
+#   ACK matrix) carries the right ACK field — stopping the server
+#   retransmitting its TLS handshake data indefinitely.
+#
+# v4.7 fix — ECDHE ClientKeyExchange:
+#   v4.6 always built an RSA-style CKE (2B len + 256B random encrypted
+#   PMS).  When the server negotiates an ECDHE cipher suite (e.g.
+#   0xC030 TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384) it expects an
+#   ECDH public key point, not an RSA ciphertext.  Parsing a 2B prefix
+#   as a 1B EC-point length (= 0x01, 1 byte) is structurally invalid
+#   and causes an immediate RST.
+#
+#   Fix:
+#     • ECDHE_CIPHER_SUITES  — set of all ECDHE suite IDs offered in CH
+#     • EC_POINT_LEN         — named-curve → uncompressed point byte size
+#     • parse_negotiated_kex()  — walks collected server pkts, extracts
+#                                 negotiated cipher (ServerHello 0x02) and
+#                                 named curve (ServerKeyExchange 0x0c),
+#                                 returns (kex_type, ec_point_len)
+#     • _build_client_key_exchange() — ECDHE branch: 1B len + 0x04 +
+#                                      random X||Y (not on curve →
+#                                      Alert illegal_parameter, NOT RST)
+#                                      RSA branch: unchanged
+#     • do_client_hello() now returns (cur_seq, new_ack, ok,
+#                                       kex_type, ec_point_len)
+#     • tls_flow_for_version() no longer pre-builds CKE; CKE_CCS_EHM
+#       entry carries None — CKE is assembled in do_cke_ccs_ehm()
+#     • do_cke_ccs_ehm() accepts (maj, minn, kex_type, ec_point_len),
+#       builds CKE fresh from the actual negotiated type
 # ============================================================
 
 TARGET               = "192.31.242.45"
@@ -46,6 +81,26 @@ TLS_VERSIONS_LIST    = [
     ("TLS1.2", 0x03, 0x03),
     # ("TLS1.3", 0x03, 0x04),
 ]
+
+# ── ECDHE cipher suite detection ─────────────────────────────
+# All ECDHE suites offered in the ClientHello above.
+# Used by parse_negotiated_kex() to decide CKE format.
+ECDHE_CIPHER_SUITES = frozenset({
+    0xC02C, 0xC030,   # ECDHE_ECDSA / ECDHE_RSA AES-256-GCM-SHA384
+    0xC02B, 0xC02F,   # ECDHE_ECDSA / ECDHE_RSA AES-128-GCM-SHA256
+    0xC024, 0xC028,   # ECDHE_ECDSA / ECDHE_RSA AES-256-CBC-SHA384
+    0xC023, 0xC027,   # ECDHE_ECDSA / ECDHE_RSA AES-128-CBC-SHA256
+    0xC00A, 0xC014,   # ECDHE_ECDSA / ECDHE_RSA AES-256-CBC-SHA
+    0xC009, 0xC013,   # ECDHE_ECDSA / ECDHE_RSA AES-128-CBC-SHA
+})
+
+# named_curve value → uncompressed EC point byte length
+# uncompressed = 0x04 + X (coord_bytes) + Y (coord_bytes)
+EC_POINT_LEN = {
+    0x0017:  65,   # secp256r1  — 0x04 + 32B + 32B
+    0x0018:  97,   # secp384r1  — 0x04 + 48B + 48B
+    0x0019: 133,   # secp521r1  — 0x04 + 66B + 66B
+}
 
 # ── TCP Options — used for 3WHS only ─────────────────────────
 # TLS packets and ACK+TTL always use dataofs=5, opt_bytes=b''
@@ -209,6 +264,79 @@ def send_then_sniff(pkt, bpf, store_fn, stop_fn, timeout):
     return collected
 
 # ============================================================
+# ACK TRACKER
+# Scans a list of collected server packets and returns the
+# highest (seq + payload_len) seen — the correct next ACK.
+# Falls back to ack_seq_val if no data packets were collected.
+# ============================================================
+def compute_new_ack(collected, ack_seq_val):
+    """
+    Walk every collected server packet and find the furthest
+    byte the server has sent.  Returns max(seq + data_len)
+    across all segments, or the existing ack_seq_val when the
+    server sent no data (bare ACKs, empty packets).
+    """
+    new_ack = ack_seq_val
+    for p in collected:
+        if not p.haslayer(TCP):
+            continue
+        srv_data = len(bytes(p[TCP].payload))
+        if srv_data > 0:
+            candidate = p[TCP].seq + srv_data
+            # seq arithmetic is mod-2^32 — handle wrap-around
+            # by treating candidate as "ahead" only when the
+            # forward distance is less than 2^31
+            diff = (candidate - new_ack) & 0xFFFFFFFF
+            if diff < 0x80000000:
+                new_ack = candidate
+    return new_ack
+
+# ============================================================
+# KEX TYPE PARSER
+# Walk collected server packets, find ServerHello (cipher suite)
+# and ServerKeyExchange (named curve).
+# Returns (kex_type, ec_point_len):
+#   kex_type     : 'ECDHE' or 'RSA'
+#   ec_point_len : uncompressed EC point size in bytes (0 for RSA)
+# ============================================================
+def parse_negotiated_kex(collected):
+    kex_type     = 'RSA'
+    ec_point_len = 0
+
+    for p in collected:
+        raw = _tls_payload_bytes(p)
+        off = 0
+        while off + 5 <= len(raw):
+            ct   = raw[off]
+            rlen = struct.unpack('!H', raw[off+3:off+5])[0]
+            body = raw[off+5:off+5+rlen]
+            off += 5 + rlen
+            if len(body) < rlen or ct != 0x16 or len(body) < 4:
+                continue
+
+            ht      = body[0]
+            hs_body = body[4:]  # skip hs_type(1) + hs_length(3)
+
+            if ht == 0x02:  # ServerHello — extract negotiated cipher suite
+                # layout: version(2) + random(32) + sid_len(1) + sid + cipher(2)
+                if len(hs_body) >= 35:
+                    sid_len = hs_body[34]
+                    cs_off  = 35 + sid_len
+                    if len(hs_body) >= cs_off + 2:
+                        cs = struct.unpack('!H', hs_body[cs_off:cs_off+2])[0]
+                        if cs in ECDHE_CIPHER_SUITES:
+                            kex_type = 'ECDHE'
+
+            elif ht == 0x0c:  # ServerKeyExchange — extract named curve
+                # ECDHE layout: curve_type(1)=0x03 + named_curve(2) + pubkey_len(1) + pubkey
+                if len(hs_body) >= 3 and hs_body[0] == 0x03:
+                    named_curve  = struct.unpack('!H', hs_body[1:3])[0]
+                    ec_point_len = EC_POINT_LEN.get(named_curve, 65)
+                    kex_type     = 'ECDHE'
+
+    return kex_type, ec_point_len
+
+# ============================================================
 # TLS RECORD BUILDERS
 # ============================================================
 def _tls_rec(hs_type, hs_body, maj, minn):
@@ -218,11 +346,6 @@ def _tls_rec(hs_type, hs_body, maj, minn):
     return b'\x16' + struct.pack('!BB', maj, minn) + struct.pack('!H', len(hs)) + hs
 
 def _build_client_hello(maj, minn, sni_name):
-    # ── FIX 4: expanded cipher suite list + required extensions ──────
-    # Previous: only 0x002F (RSA) → server had no ECDHE choice
-    # Fixed: 18 ciphers covering ECDHE-RSA, ECDHE-ECDSA, RSA variants
-    # Extensions: SNI + supported_groups + ec_point_formats + sig_algs
-    # Required for server to negotiate ECDHE correctly
     sni_b   = sni_name.encode()
     sni_ext = (b'\x00\x00'
                + struct.pack('!H', 2 + 1 + 2 + len(sni_b))
@@ -231,7 +354,6 @@ def _build_client_hello(maj, minn, sni_name):
                + struct.pack('!H', len(sni_b))
                + sni_b)
 
-    # Cipher suites — ECDHE first (server preference), RSA fallback
     cipher_suites = (
         b'\xc0\x2c'   # TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
         b'\xc0\x30'   # TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
@@ -254,7 +376,6 @@ def _build_client_hello(maj, minn, sni_name):
     )
     cs_field = struct.pack('!H', len(cipher_suites)) + cipher_suites
 
-    # Supported groups (required for ECDHE key exchange)
     groups  = (b'\x00\x17'   # secp256r1
                b'\x00\x18'   # secp384r1
                b'\x00\x19')  # secp521r1
@@ -263,10 +384,8 @@ def _build_client_hello(maj, minn, sni_name):
                + struct.pack('!H', len(groups))
                + groups)
 
-    # EC point formats (uncompressed = 0x00)
     pt_ext  = b'\x00\x0b\x00\x02\x01\x00'
 
-    # Signature algorithms (required for TLS 1.2)
     sig_algs = (b'\x04\x01'   # RSA_PKCS1_SHA256
                 b'\x05\x01'   # RSA_PKCS1_SHA384
                 b'\x06\x01'   # RSA_PKCS1_SHA512
@@ -287,39 +406,35 @@ def _build_client_hello(maj, minn, sni_name):
                + struct.pack('!H', len(exts)) + exts)
     return _tls_rec(0x01, ch_body, maj, minn)
 
-def _build_client_key_exchange(maj, minn):
-    # ── FIX 1: RSA-2048 correct encrypted PMS size ───────────────────
-    # Previous: 2B + 48B = 50B body → server parse fail (expected 256B)
-    # Fixed:    2B length + 256B random ciphertext = 258B body
-    # Server: attempts RSA-2048 PKCS#1 decrypt → random → decrypt_error Alert
-    # NOT RST — record is structurally valid, server processes it ✓
-    encrypted_pms = bytes(random.randint(0, 255) for _ in range(256))
-    cke_body      = struct.pack('!H', 256) + encrypted_pms
+def _build_client_key_exchange(maj, minn, kex_type='RSA', ec_point_len=65):
+    if kex_type == 'ECDHE':
+        # Uncompressed EC point: 0x04 + random X + random Y
+        # Coordinates are random — not a valid curve point.
+        # Server parses structure OK (1B length + point bytes), then
+        # validates the point → not on curve →
+        #   Alert(illegal_parameter 0x2f)   NOT RST
+        # (RST happened before because the RSA 2B length prefix was
+        #  read as a 1B EC point length = 0x01, which is an immediate
+        #  TLS record parse failure → server RSTs.)
+        point    = bytes([0x04]) + bytes(random.randint(0, 255)
+                                         for _ in range(ec_point_len - 1))
+        cke_body = bytes([ec_point_len]) + point   # 1B len + point
+    else:
+        # RSA-2048: 2B length + 256B random ciphertext
+        # Server: RSA-2048 PKCS#1 decrypt → random → decrypt_error Alert
+        encrypted_pms = bytes(random.randint(0, 255) for _ in range(256))
+        cke_body      = struct.pack('!H', 256) + encrypted_pms
     return _tls_rec(0x10, cke_body, maj, minn)
 
 def _build_change_cipher_spec(maj, minn):
-    # ContentType=0x14, body=0x01 (single byte) — unchanged, was correct
     return b'\x14' + struct.pack('!BB', maj, minn) + b'\x00\x01' + b'\x01'
 
 def _build_encrypted_handshake_msg(maj, minn):
-    # ── FIX 3: correct CBC-SHA Finished record structure ─────────────
-    # Previous: _tls_rec(0x14, 64B_random) → exposed hs_type byte
-    #           server saw unknown HS type → RST during parse
-    # Fixed:    raw ContentType=0x16 record, body = IV+CT+MAC
-    #
-    # AES-128-CBC + HMAC-SHA1 structure (matches 0x002F and CBC ciphers):
-    #   IV         = 16B  random (AES block size)
-    #   ciphertext = 16B  random (1 AES block covering padded Finished)
-    #   MAC        = 20B  random (HMAC-SHA1 output size)
-    #   Total body = 52B
-    #
-    # Server: AES-CBC decrypt with IV → random plaintext
-    #         HMAC-SHA1 verify → fails → Alert(bad_record_mac 0x14)
-    #         NOT RST — record structure is valid, server parses it ✓
+    # AES-128-CBC + HMAC-SHA1: IV(16) + CT(16) + MAC(20) = 52B
     iv         = bytes(random.randint(0, 255) for _ in range(16))
     ciphertext = bytes(random.randint(0, 255) for _ in range(16))
     mac        = bytes(random.randint(0, 255) for _ in range(20))
-    body       = iv + ciphertext + mac   # 52B
+    body       = iv + ciphertext + mac
     return (b'\x16'
             + struct.pack('!BB', maj, minn)
             + struct.pack('!H', len(body))
@@ -327,25 +442,17 @@ def _build_encrypted_handshake_msg(maj, minn):
 
 # ============================================================
 # TLS FLOW BUILDER
-#
-# Packet 1 : ClientHello                   (separate, dataofs=5)
-# Packet 2 : CKE + CCS + EncHandshake     (combined, dataofs=5)
-#            ↑ matches browser Wireshark exactly
 # ============================================================
 def tls_flow_for_version(label, tls_maj, tls_min, sni_name):
-    maj, minn = tls_maj, tls_min
-
-    ch       = _build_client_hello(maj, minn, sni_name)
-
-    # Combined: ClientKeyExchange + ChangeCipherSpec + EncHandshakeMsg
-    cke      = _build_client_key_exchange(maj, minn)
-    ccs      = _build_change_cipher_spec(maj, minn)
-    ehm      = _build_encrypted_handshake_msg(maj, minn)
-    combined = cke + ccs + ehm   # ONE TCP payload
-
+    # Only ClientHello is pre-built here — it does not depend on the
+    # server's response.  CKE+CCS+EHM is assembled in do_cke_ccs_ehm()
+    # after do_client_hello() has parsed the negotiated cipher suite and
+    # named curve from ServerHello / ServerKeyExchange, so the CKE can
+    # be built with the correct key-exchange format (ECDHE or RSA).
+    ch = _build_client_hello(tls_maj, tls_min, sni_name)
     return [
-        (f"{label}/ClientHello",            ch,       "ClientHello"),
-        (f"{label}/CKE+CCS+EncHandshake",   combined, "CKE_CCS_EHM"),
+        (f"{label}/ClientHello",           ch,   "ClientHello"),
+        (f"{label}/CKE+CCS+EncHandshake",  None, "CKE_CCS_EHM"),
     ]
 
 # ============================================================
@@ -390,8 +497,6 @@ def do_wait_synack(syn_pkt, sport, dport):
 
 # ============================================================
 # STEP 3 : clean ACK — completes 3WHS
-# Uses same dataofs/opt_bytes as SYN (3WHS options)
-# Server sends nothing after bare ACK — no wait needed
 # ============================================================
 def do_3whs_ack(sport, dport, proto, dataofs, opt_bytes,
                 cur_seq, ack_seq_val):
@@ -406,13 +511,17 @@ def do_3whs_ack(sport, dport, proto, dataofs, opt_bytes,
           f"→{dport:<5} | Flags=A    | "
           f"Ofs={dataofs}({(dataofs*4)-20:>2}B opts) | "
           f"clean ACK | seq={cur_seq} ack={ack_seq_val}")
-    return cur_seq   # unchanged — empty ACK does not advance seq
+    return cur_seq
 
 # ============================================================
 # STEP 4a : ClientHello → wait ServerHello + Cert + SHDone
 #
-# Uses PLAIN_DATAOFS=5, PLAIN_OPTS=b'' — no TCP options
-# Collects until ServerHelloDone (ht=0x0e) or Alert or timeout
+# Returns (cur_seq, new_ack_seq_val, ok)
+#
+# new_ack_seq_val is computed from the highest (seq + len) seen
+# across all collected server segments so that the subsequent
+# CKE+CCS+EHM and ACK-matrix packets carry the correct ACK —
+# preventing the server from retransmitting its TLS handshake.
 # ============================================================
 def do_client_hello(sport, dport, proto,
                     cur_seq, ack_seq_val,
@@ -429,7 +538,7 @@ def do_client_hello(sport, dport, proto,
           f"→{dport:<5} | Flags=PA   | "
           f"Ofs={PLAIN_DATAOFS}( 0B opts) | "
           f"Step={step_label:<35} | "
-          f"Payload={len(tls_payload)}B | seq={cur_seq}")
+          f"Payload={len(tls_payload)}B | seq={cur_seq} ack={ack_seq_val}")
 
     def _store(p, col):
         ct = get_tls_content_type(p)
@@ -448,7 +557,19 @@ def do_client_hello(sport, dport, proto,
 
     if not collected:
         print(f"         [!] No ServerHello received")
-        return cur_seq, False
+        return cur_seq, ack_seq_val, False, 'RSA', 0
+
+    # ── v4.6: advance ack_seq_val past all received server data ──────
+    new_ack = compute_new_ack(collected, ack_seq_val)
+    if new_ack != ack_seq_val:
+        print(f"         [ack update ] {ack_seq_val} → {new_ack} "
+              f"(+{(new_ack - ack_seq_val) & 0xFFFFFFFF}B server data ACKed)")
+
+    # ── v4.7: parse negotiated kex type from ServerHello + SKE ───────
+    kex_type, ec_point_len = parse_negotiated_kex(collected)
+    kex_tag = (f"ec_point_len={ec_point_len}" if kex_type == 'ECDHE'
+               else "rsa-2048")
+    print(f"         [kex parsed ] kex={kex_type}  {kex_tag}")
 
     for p in collected:
         ct  = get_tls_content_type(p)
@@ -458,18 +579,33 @@ def do_client_hello(sport, dport, proto,
             tag += f"/{tls_ht_name(ht)}"
         print(f"         [←TLS     ] {tag}")
 
-    return cur_seq, True
+    return cur_seq, new_ack, True, kex_type, ec_point_len
 
 # ============================================================
 # STEP 4b : CKE+CCS+EncHandshake (combined) →
 #           wait CCS + EncHandshake + ApplicationData
 #
-# Uses PLAIN_DATAOFS=5, PLAIN_OPTS=b'' — no TCP options
-# Stop on ApplicationData (0x17) — TLS session fully up
+# Returns (cur_seq, new_ack_seq_val)
+#
+# v4.7: accepts (maj, minn, kex_type, ec_point_len) from
+# do_client_hello() and builds the CKE fresh here using the
+# actual negotiated key-exchange type, so the server receives
+# a structurally correct record (ECDHE or RSA) and responds
+# with an Alert instead of an immediate RST.
+#
+# v4.6: advances ack_seq_val past the server's reply so the
+# ACK-matrix step opens with the right ACK field.
 # ============================================================
 def do_cke_ccs_ehm(sport, dport, proto,
                    cur_seq, ack_seq_val,
-                   tls_payload, step_label, tls_count):
+                   maj, minn, kex_type, ec_point_len,
+                   step_label, tls_count):
+    # ── v4.7: build CKE with the negotiated kex type ─────────────────
+    cke         = _build_client_key_exchange(maj, minn, kex_type, ec_point_len)
+    ccs         = _build_change_cipher_spec(maj, minn)
+    ehm         = _build_encrypted_handshake_msg(maj, minn)
+    tls_payload = cke + ccs + ehm
+
     tls_raw = build_tcp_raw(sport, dport, "PA",
                              PLAIN_DATAOFS, PLAIN_OPTS,
                              seq=cur_seq, ack_seq=ack_seq_val,
@@ -477,12 +613,14 @@ def do_cke_ccs_ehm(sport, dport, proto,
     tls_pkt = IP(dst=TARGET, ttl=SYN_TTL, proto=proto) / Raw(tls_raw)
     bpf     = session_bpf(sport, dport)
 
+    kex_tag = (f"ec_pt={ec_point_len}B" if kex_type == 'ECDHE' else "rsa-2048")
     print(f"[TLS  {tls_count:>5}] "
           f"TTL={SYN_TTL:>3}(fixed) | "
           f"→{dport:<5} | Flags=PA   | "
           f"Ofs={PLAIN_DATAOFS}( 0B opts) | "
           f"Step={step_label:<35} | "
-          f"Payload={len(tls_payload)}B | seq={cur_seq}")
+          f"kex={kex_type}({kex_tag}) | "
+          f"Payload={len(tls_payload)}B | seq={cur_seq} ack={ack_seq_val}")
 
     def _store(p, col):
         ct = get_tls_content_type(p)
@@ -501,6 +639,13 @@ def do_cke_ccs_ehm(sport, dport, proto,
     if not collected:
         print(f"         [!] No server response to CKE+CCS+EHM")
     else:
+        # ── v4.6: advance ack_seq_val past server's reply ────────────
+        new_ack = compute_new_ack(collected, ack_seq_val)
+        if new_ack != ack_seq_val:
+            print(f"         [ack update ] {ack_seq_val} → {new_ack} "
+                  f"(+{(new_ack - ack_seq_val) & 0xFFFFFFFF}B server data ACKed)")
+        ack_seq_val = new_ack
+
         for p in collected:
             ct  = get_tls_content_type(p)
             ht  = get_tls_handshake_type(p)
@@ -509,13 +654,10 @@ def do_cke_ccs_ehm(sport, dport, proto,
                 tag += f"/{tls_ht_name(ht)}"
             print(f"         [←TLS     ] {tag}")
 
-    return cur_seq
+    return cur_seq, ack_seq_val
 
 # ============================================================
 # STEP 5 : ACK matrix — TTL_LIST × ACK_PACKET_COUNT
-#
-# Uses PLAIN_DATAOFS=5, PLAIN_OPTS=b'' — no TCP options
-# Every single packet: send → wait reply → log reply
 # ============================================================
 def do_ack_matrix(sport, dport, proto,
                   cur_seq, ack_seq_val,
@@ -528,7 +670,6 @@ def do_ack_matrix(sport, dport, proto,
             pload     = random_payload()
             pload_len = len(pload)
 
-            # No TCP options — PLAIN_DATAOFS=5, PLAIN_OPTS=b''
             ack_raw = build_tcp_raw(sport, dport, "A",
                                      PLAIN_DATAOFS, PLAIN_OPTS,
                                      seq=cur_seq,
@@ -543,12 +684,11 @@ def do_ack_matrix(sport, dport, proto,
                   f"→{dport:<5} | Flags=A    | "
                   f"Ofs={PLAIN_DATAOFS}( 0B opts) | "
                   f"Payload={pload_len:>2}B [{pload[:8].decode()}…] | "
-                  f"seq={cur_seq}")
+                  f"seq={cur_seq} ack={ack_seq_val}")
 
-            # ── wait for any reply ────────────────────────────
             def _store(p, col):
                 f = get_tcp_flags(p)
-                if f is not None and (f & 0x14):   # ACK or RST
+                if f is not None and (f & 0x14):
                     col.append(p)
 
             def _stop(p):
@@ -633,10 +773,10 @@ print(f"    SYN (opts)                 → send  [dataofs from map]")
 print(f"    SYN-ACK                    ← wait  [sniff BPF]")
 print(f"    ACK clean (opts)           → send  [dataofs from map, 3WHS done]")
 print(f"    ClientHello                → send  [dataofs=5, NO opts]")
-print(f"    ServerHello+Cert+SHDone    ← wait  [stop on SHDone]")
-print(f"    CKE+CCS+EncHandshake       → send  [dataofs=5, NO opts, one packet]")
-print(f"    CCS+EncHandshake+AppData   ← wait  [stop on AppData]")
-print(f"    ACK(payload,TTL=N)         → send  [dataofs=5, NO opts]")
+print(f"    ServerHello+Cert+SHDone    ← wait  [stop on SHDone, ack updated]")
+print(f"    CKE+CCS+EncHandshake       → send  [dataofs=5, NO opts, correct ack]")
+print(f"    CCS+EncHandshake+AppData   ← wait  [stop on AppData, ack updated]")
+print(f"    ACK(payload,TTL=N)         → send  [dataofs=5, NO opts, correct ack]")
 print(f"    reply                      ← wait  [every TTL, every count]")
 print(f"\n  Target      : {TARGET}")
 print(f"  SYN TTL     : {SYN_TTL}  (fixed)")
@@ -700,24 +840,35 @@ for proto in IP_PROTO_LIST:
                             flow = tls_flow_for_version(
                                        ver_label, tls_maj, tls_min, SNI_NAME)
 
+                            # v4.7: kex defaults — overwritten after ClientHello
+                            kex_type     = 'RSA'
+                            ec_point_len = 0
+
                             for step_label, tls_payload, step_type in flow:
                                 tls_count += 1
 
                                 if step_type == "ClientHello":
                                     # → ClientHello
-                                    # ← ServerHello + Cert + SHDone
-                                    cur_seq, ok = do_client_hello(
-                                        sport, dport, proto,
-                                        cur_seq, ack_seq_val,
-                                        tls_payload, step_label, tls_count)
+                                    # ← ServerHello + Cert + SKE + SHDone
+                                    # v4.6: ack_seq_val updated from reply
+                                    # v4.7: kex_type + ec_point_len parsed from reply
+                                    cur_seq, ack_seq_val, ok, kex_type, ec_point_len = \
+                                        do_client_hello(
+                                            sport, dport, proto,
+                                            cur_seq, ack_seq_val,
+                                            tls_payload, step_label, tls_count)
 
                                 elif step_type == "CKE_CCS_EHM":
-                                    # → CKE + CCS + EncHandshakeMsg
-                                    # ← CCS + EncHandshake + AppData
-                                    cur_seq = do_cke_ccs_ehm(
+                                    # → CKE (ECDHE or RSA) + CCS + EncHandshakeMsg
+                                    # ← CCS + EncHandshake + AppData (or Alert)
+                                    # v4.6: ack_seq_val updated from reply
+                                    # v4.7: CKE built from kex_type/ec_point_len
+                                    cur_seq, ack_seq_val = do_cke_ccs_ehm(
                                         sport, dport, proto,
                                         cur_seq, ack_seq_val,
-                                        tls_payload, step_label, tls_count)
+                                        tls_maj, tls_min,
+                                        kex_type, ec_point_len,
+                                        step_label, tls_count)
 
                     # ── Step 5 : ACK matrix  (NO options) ───────────────
                     cur_seq = do_ack_matrix(
