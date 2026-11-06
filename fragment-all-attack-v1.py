@@ -7,38 +7,187 @@ import os, sys
 #         Run as: sudo python3 frag_scan.py
 # ============================================================
 
-target = "192.31.242.65"
+target = "192.31.242.45"
 
 # ===== ALL PARAMETERS — EDIT HERE =====
 
-ttl_list          = [12,13,14,15,16,17,18,19,20]
+ttl_list          = [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255]
 tos_list          = [0x00]
 payload_size_list = [1024]
 
 # Fragment sizes — multiples of 8 only (RFC 791)
 # Odd numbers auto-rounded down to nearest multiple of 8
-fragment_size_list = [8]
+fragment_size_list = [8,16,32]
 
 # Fragment send orders — permutations of [0,1,2] index
 # "all"   → test every permutation automatically
 # or pick specific: [(0,1,2), (2,1,0), (1,0,2)]
-fragment_order_mode = "custom"   # "all" or "custom"
+fragment_order_mode = "all"   # "all" or "custom"
 fragment_order_custom = [(0,1,2), (2,1,0)]  # used only if mode="custom"
 
 # ── PROTOCOL ARRAYS ─────────────────────────────────────────
 # Whitelist = trusted/allowed protocols (used as F1 in overlap)
 whitelist_protocols = {
-    1: "ICMP",
+    0:   "HOPOPT",
+    1:   "ICMP",
+    2:   "IGMP",
+    3:   "GGP",
+    4:   "IPv4",
+    8:   "EGP",
+    9:   "IGP",
+    10:  "BBN-RCC-MON",
+    11:  "NVP-II",
+    12:  "PUP",
+    13:  "ARGUS",
+    14:  "EMCON",
+    15:  "XNET",
+    16:  "CHAOS",
+    17:  "UDP",
+    18:  "MUX",
+    19:  "DCN-MEAS",
+    20:  "HMP",
+    21:  "PRM",
+    22:  "XNS-IDP",
+    23:  "TRUNK-1",
+    24:  "TRUNK-2",
+    25:  "LEAF-1",
+    26:  "LEAF-2",
+    27:  "RDP",
+    28:  "IRTP",
+    29:  "ISO-TP4",
+    30:  "NETBLT",
+    31:  "MFE-NSP",
+    32:  "MERIT-INP",
+    33:  "DCCP",
+    34:  "3PC",
+    35:  "IDPR",
+    36:  "XTP",
+    37:  "DDP",
+    38:  "IDPR-CMTP",
+    39:  "TP++",
+    40:  "IL",
+    41:  "IPv6",
+    42:  "SDRP",
+    43:  "IPv6-Route",
+    44:  "IPv6-Frag",
+    45:  "IDRP",
+    46:  "RSVP",
     47:  "GRE",
+    48:  "DSR",
+    49:  "BNA",
+    50:  "ESP",
+    51:  "AH",
+    52:  "I-NLSP",
+    53:  "SWIPE",
+    54:  "NARP",
+    55:  "Min-IPv4",
+    56:  "TLSP",
+    57:  "SKIP",
+    58:  "IPv6-ICMP",
+    59:  "IPv6-NoNxt",
+    60:  "IPv6-Opts",
+    61:  "ANY-HOST-INTERNAL",
+    62:  "CFTP",
+    63:  "ANY-LOCAL-NETWORK",
+    64:  "SAT-EXPAK",
+    65:  "KRYPTOLAN",
+    66:  "RVD",
+    67:  "IPPC",
+    68:  "ANY-DIST-FS",
+    69:  "SAT-MON",
+    70:  "VISA",
+    71:  "IPCV",
+    72:  "CPNX",
+    73:  "CPHB",
+    74:  "WSN",
+    75:  "PVP",
+    76:  "BR-SAT-MON",
+    77:  "SUN-ND",
+    78:  "WB-MON",
+    79:  "WB-EXPAK",
+    80:  "ISO-IP",
+    81:  "VMTP",
+    82:  "SECURE-VMTP",
+    83:  "VINES",
+    84:  "IPTM",
+    85:  "NSFNET-IGP",
+    86:  "DGP",
+    87:  "TCF",
+    88:  "EIGRP",
+    89:  "OSPFIGP",
+    90:  "Sprite-RPC",
+    91:  "LARP",
+    92:  "MTP",
+    93:  "AX.25",
+    94:  "IPIP",
+    95:  "MICP",
+    96:  "SCC-SP",
+    97:  "ETHERIP",
+    98:  "ENCAP",
+    99:  "ANY-PRIVATE-ENCRYPTION",
+    100: "GMTP",
+    101: "IFMP",
+    102: "PNNI",
+    103: "PIM",
+    104: "ARIS",
+    105: "SCPS",
+    106: "QNX",
+    107: "A/N",
+    108: "IPComp",
+    109: "SNP",
+    110: "Compaq-Peer",
+    111: "IPX-in-IP",
     112: "VRRP",
+    113: "PGM",
+    114: "ANY-0-HOP",
+    115: "L2TP",
+    116: "DDX",
+    117: "IATP",
+    118: "STP",
+    119: "SRP",
+    120: "UTI",
+    121: "SMP",
+    122: "SM",
+    123: "PTP",
+    124: "ISIS-over-IPv4",
+    125: "FIRE",
+    126: "CRTP",
+    127: "CRUDP",
+    128: "SSCOPMCE",
+    129: "IPLT",
+    130: "SPS",
+    131: "PIPE",
     132: "SCTP",
+    133: "FC",
+    134: "RSVP-E2E-IGNORE",
+    135: "Mobility-Header",
+    136: "UDPLite",
+    137: "MPLS-in-IP",
+    138: "manet",
+    139: "HIP",
+    140: "Shim6",
+    141: "WESP",
+    142: "ROHC",
+    143: "Ethernet",
+    144: "AGGFRAG",
+    145: "NSH",
+    146: "Homa",
+    147: "BIT-EMU",
+    253: "EXPERIMENTATION-1",
+    254: "EXPERIMENTATION-2",
+    255: "Reserved",
    
 }
 
 # Forged = unexpected protocols (used as F2 in overlap)
 forged_protocols = {
    
-     6: "TCP"
+    0:   "HOPOPT",
+    1:   "ICMP",
+    2:   "IGMP",
+    3:   "GGP",
+    4:   "IPv4",
+    5:   "ST"
 }
 
 # ── PAYLOAD OVERLAP PAIRS ───────────────────────────────────
@@ -54,7 +203,7 @@ overlap_pairs = {
 # ── PORT OVERLAP — ENABLE/DISABLE ───────────────────────────
 # True  → Section 4C runs (TCP/UDP dest port overlap test)
 # False → Section 4C skipped entirely (IP protocol overlap only)
-enable_port_overlap = False
+enable_port_overlap = True
 
 # ── PORT TRANSPORT PROTOCOL ──────────────────────────────────
 # Which transport to use for port overlap test
