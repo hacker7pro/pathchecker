@@ -7,113 +7,127 @@ import os, sys
 #   Run as: sudo python3 frag_scan.py
 # ================================================================
 
-target = "192.31.242.231"
+# ================================================================
+#  ★★★ MASTER TEST KEY — SET THIS FIRST ★★★
+# ================================================================
+#
+#  "auto"   → Automatic mode
+#             User sets ONLY: target (Section A) + ttl_list (Section A)
+#             Script auto-selects ALL other values:
+#               - payload_layer, enable_fragment, all on/off flags
+#               - tos, ip_id, payload sizes, fragment sizes
+#               - protocols, ports, patterns, OS orders
+#               - test_mode runs both sequential + combination
+#             Best for: quick full scan with no configuration effort
+#
+#  "manual" → Manual mode
+#             All settings below this line are used exactly as written
+#             User controls every parameter individually
+#             Best for: targeted testing with specific configurations
+#
+test_key = "auto"   # "auto" | "manual"
 
 # ================================================================
 #  ★★★ ON/OFF SWITCHES — EDIT HERE ★★★
+#  (used only when test_key="manual" — ignored in auto mode)
+#  All user configuration is in this file above the
+#  "DERIVED / AUTO-COMPUTED" line — do not edit below that line
 # ================================================================
-
-# ── FRAGMENT MODE ────────────────────────────────────────────────
-enable_fragment            = True   # True  → fragmented packets (S3/4A/4B/4C active)
-                                    # False → plain packets only
 
 # ── SECTION ON/OFF ───────────────────────────────────────────────
 enable_section1_whitelist  = True   # Whitelist protocol sweep
 enable_section2_forged     = True   # Forged protocol sweep
 enable_payload_overlap     = True   # Section 4A — payload overlap
 enable_proto_overlap       = True   # Section 4B — IP protocol conflict
-enable_port_overlap        = True   # Section 4C — port conflict
+enable_port_overlap        = True   # Section 4C — port conflict (L4 only)
+                                    # auto-skipped when payload_layer="ip"
 
-# ── PAYLOAD LAYER SELECTION ──────────────────────────────────────
-# Choose ONE layer to test — strictly one or the other, not both:
+# ── FRAGMENT MODE ────────────────────────────────────────────────
+# True  → fragmented packets (Sections 3/4A/4B/4C active)
+# False → plain packets only
+enable_fragment            = True
+
+# ── PAYLOAD LAYER — pick exactly one ────────────────────────────
+# "ip" → IP layer payload
+#         Active  : IHL, IP options, ip_payload_overlap, ip_plain_payload
+#         Inactive: TCP flags, TCP options, TCP dataofs, TCP urgptr,
+#                   bogus_length, tcp_payload_overlap, tcp_plain_payload,
+#                   port_overlap (Section 4C)
 #
-#   "ip" → IP layer payload
-#           Payload = raw IP protocol data (TCP/GRE/OSPF bytes as IP content)
-#           Active options: IHL, IP options, IP fragmentation,
-#                           ip_payload_overlap, ip_plain_payload
-#           Inactive: TCP flags, TCP options, TCP dataofs, urgptr,
-#                     bogus_length, tcp_payload_overlap, tcp_plain_payload
+# "l4" → Layer 4 payload
+#         Active  : TCP flags, TCP options, TCP dataofs, TCP dataofs_mismatch,
+#                   TCP urgptr, bogus_length, tcp_payload_overlap,
+#                   tcp_plain_payload, port_overlap (Section 4C)
+#         Inactive: IHL, IP options, ip_payload_overlap, ip_plain_payload
 #
-#   "l4" → Layer 4 payload
-#           Payload = L4 protocol data (HTTP/FTP/DNS content inside TCP/UDP)
-#           Active options: TCP flags, TCP options, TCP dataofs,
-#                           TCP urgptr, bogus_length,
-#                           tcp_payload_overlap, tcp_plain_payload
-#           Inactive: IHL, IP options, ip_payload_overlap, ip_plain_payload
-#
-# Common options (always active for both):
+# Common (always active regardless of layer):
 #   TTL, TOS, IP ID, whitelist_protocols, fragment sizes, OS order,
-#   port_overlap, proto_overlap, payload_overlap (section 4A core)
+#   proto_overlap (4B), payload_overlap core (4A)
 #
-payload_layer = "ip"   # "ip" | "l4"  (no "both" — pick one)
+payload_layer = "ip"   # "ip" | "l4"  — no other values accepted
 
-# ── IP LAYER OPTIONS (only active when payload_layer="ip" or "both") ──
-enable_ip_options          = True   # IP options sweep (RR/NOP/Timestamp/raw bytes)
-enable_ihl                 = True   # IP IHL bogus values (IP header length field)
-enable_ip_payload_overlap  = True   # IP layer payload overlap (fragment attack)
+# ── IP LAYER ON/OFF (active only when payload_layer="ip") ────────
+enable_ip_options          = True   # IP options sweep (RR/NOP/Timestamp/raw)
+enable_ihl                 = True   # IP IHL bogus values sweep
+enable_ip_payload_overlap  = True   # IP layer payload overlap (fragment)
 enable_ip_plain_payload    = True   # IP plain payload sweep (non-fragment)
 
-# ── L4 LAYER OPTIONS (only active when payload_layer="l4" or "both") ──
+# ── L4 LAYER ON/OFF (active only when payload_layer="l4") ────────
 enable_tcp_flags           = True   # TCP flag combinations sweep
 enable_tcp_options         = True   # TCP options field sweep
 enable_tcp_dataofs         = True   # TCP data offset bogus values sweep
-enable_tcp_dataofs_mismatch= True   # TCP dataofs mismatch with actual options size
+enable_tcp_dataofs_mismatch= True   # TCP dataofs mismatch with actual options
 enable_tcp_urgptr          = True   # TCP urgent pointer bogus values (URG flag)
 enable_bogus_length        = True   # L4 bogus length/offset field
                                     #   TCP=bogus dataofs | UDP/SCTP/DCCP=bogus len
-enable_tcp_payload_overlap = True   # TCP layer payload overlap (fragment attack)
+enable_tcp_payload_overlap = True   # TCP layer payload overlap (fragment)
 enable_tcp_plain_payload   = True   # TCP plain payload sweep (non-fragment)
 
 # ── TEST MODE ────────────────────────────────────────────────────
-# Controls how attacks run — automatically respects enable_fragment:
-#   enable_fragment=True  → sequential/combo uses fragment-based attacks
-#   enable_fragment=False → sequential/combo uses plain-packet attacks
-#
-#   "sequential"  → one attack type at a time, complete before next
-#   "combination" → two attacks combined in one packet
-#   "both"        → sequential first, then combination
-#
+# "sequential"  → one attack type fully completes before next starts
+# "combination" → two attacks combined into one packet
+# "both"        → sequential first, then combination
+# Respects enable_fragment and payload_layer automatically
 test_mode = "both"   # "sequential" | "combination" | "both"
 
-# Combination pairs — available attack names depend on payload_layer:
-#   IP layer  : "ihl", "ip_options", "proto_overlap", "ip_payload_overlap"
+# Combination pairs — script auto-filters pairs that don't match payload_layer
+# Available names:
+#   IP layer  : "ihl", "ip_options", "ip_payload_overlap"
 #   L4 layer  : "tcp_flags", "tcp_options", "tcp_dataofs", "tcp_urgptr",
-#               "bogus_length", "tcp_payload_overlap"
-#   Common    : "port_overlap", "payload_overlap", "proto_overlap"
-#
-# Script auto-filters pairs — if an attack needs IP layer but payload_layer="l4",
-# that pair is skipped automatically
+#               "bogus_length", "tcp_payload_overlap", "port_overlap"
+#   Common    : "proto_overlap", "payload_overlap"
 test_combination_pairs = [
-    ("bogus_length",    "port_overlap"),      # L4 bogus len + port conflict
-    ("payload_overlap", "port_overlap"),      # payload conflict + port conflict
-    ("tcp_flags",       "bogus_length"),      # unusual flag + bogus len (L4)
-    ("tcp_options",     "tcp_dataofs"),       # options + offset mismatch (L4)
-    ("proto_overlap",   "payload_overlap"),   # IP proto conflict + payload conflict
-    ("ihl",             "bogus_length"),      # IP IHL bogus + L4 bogus len (IP+L4)
-    ("ip_options",      "proto_overlap"),     # IP options + proto conflict (IP)
-    ("tcp_urgptr",      "tcp_flags"),         # urgptr + flags (L4)
+    ("bogus_length",    "port_overlap"),      # L4: bogus len + port conflict
+    ("payload_overlap", "port_overlap"),      # common + L4: payload + port
+    ("tcp_flags",       "bogus_length"),      # L4: flag + bogus len
+    ("tcp_options",     "tcp_dataofs"),       # L4: options + offset mismatch
+    ("proto_overlap",   "payload_overlap"),   # common: proto + payload
+    ("ihl",             "bogus_length"),      # IP+L4: IHL bogus + bogus len
+    ("ip_options",      "proto_overlap"),     # IP+common: IP opts + proto
+    ("tcp_urgptr",      "tcp_flags"),         # L4: urgptr + flags
 ]
 
-
 # ================================================================
-#  SECTION A — TARGET + BASIC IP PARAMETERS
+#  SECTION A — TARGET + COMMON PARAMETERS
 # ================================================================
 
+target = "192.31.242.231"
+
+# ── COMMON (always apply regardless of payload_layer) ────────────
 ttl_list           = [5, 10, 32, 64, 128]
 tos_list           = [0x00, 0xB8, 0x88, 0xC0, 0xE0]
 payload_size_list  = [8, 16, 32, 64, 128, 256, 512, 1024]
 
 # ── IP ID ────────────────────────────────────────────────────────
 # "auto"   → Scapy picks automatically
-# "manual" → use ip_id_list values
+# "manual" → use ip_id_list values below
 ip_id_mode = "auto"
 ip_id_list = [0x0000, 0x1234, 0xdead, 0xbeef, 0xffff, 0x4141]
 # Range hint: 0x0000 – 0xFFFF (0 to 65535)
 
 # ================================================================
 #  SECTION B — FRAGMENT OPTIONS
-#  enable_fragment = True  → fragmented packets (Sections 3/4A/4B/4C active)
-#  enable_fragment = False → plain packets only (Sections 3/4A/4B/4C skip)
+#  enable_fragment=False → Sections 3/4A/4B/4C auto-skip
 # ================================================================
 
 # Fragment sizes — multiples of 8 only (RFC 791)
@@ -122,60 +136,47 @@ ip_id_list = [0x0000, 0x1234, 0xdead, 0xbeef, 0xffff, 0x4141]
 fragment_size_list = [8, 16, 24, 32, 64, 128, 256, 512]
 
 # ── FRAGMENT SEND ORDER ──────────────────────────────────────────
-# "all"    → all 6 permutations of [F1,F2,F3]
-# "os"     → per-OS reassembly behavior (see table + list below)
-# "custom" → only the tuples in fragment_order_custom
+# "all"    → all 6 permutations
+# "os"     → per-OS reassembly behavior (see table below)
+# "custom" → only tuples in fragment_order_custom
 fragment_order_mode = "os"
 
-# OS reassembly behavior reference:
-#  ┌─────────────────┬────────┬─────────────┬──────────────────────────────────────────┐
-#  │ OS              │ Policy │ Send Order  │ Behavior                                 │
-#  ├─────────────────┼────────┼─────────────┼──────────────────────────────────────────┤
-#  │ Linux_2x        │ first  │ F1->F2->F3 │ First frag wins overlap; in-order        │
-#  │ Linux_3x_4x     │ last   │ F3->F2->F1 │ Last frag wins overlap; any order        │
-#  │ Windows_XP      │ last   │ F2->F1->F3 │ Last frag wins; out-of-order reassembly  │
-#  │ Windows_7_10    │ first  │ F1->F3->F2 │ First frag wins; RFC 791 preferred       │
-#  │ Windows_2008    │ first  │ F1->F2->F3 │ First frag wins; drops heavy overlaps    │
-#  │ BSD_FreeBSD     │ first  │ F1->F2->F3 │ First frag wins; strict first-arrival    │
-#  │ macOS           │ first  │ F1->F3->F2 │ First frag wins (BSD inherit); strict    │
-#  │ Cisco_IOS       │ last   │ F3->F1->F2 │ Last frag wins; out-of-order ok          │
-#  │ Juniper_JunOS   │ first  │ F1->F2->F3 │ First frag wins; drops dup offsets       │
-#  │ Solaris         │ last   │ F2->F3->F1 │ Last frag wins; tolerant of reorder      │
-#  │ HP_UX           │ first  │ F1->F2->F3 │ First frag wins; drops overlaps          │
-#  │ AIX             │ last   │ F3->F2->F1 │ Last frag wins; any order accepted       │
-#  └─────────────────┴────────┴─────────────┴──────────────────────────────────────────┘
-# Policy:
-#   first = overlap zone keeps F1 data (F2 ignored)
-#   last  = overlap zone keeps F2 data (overwrites F1)
-#
-# Add/remove entries to control which OS orders run:
+# OS reassembly behavior table:
+#  ┌─────────────────┬────────┬─────────────┬──────────────────────────────────────┐
+#  │ OS              │ Policy │ Send Order  │ Behavior                             │
+#  ├─────────────────┼────────┼─────────────┼──────────────────────────────────────┤
+#  │ Linux_2x        │ first  │ F1->F2->F3 │ First frag wins overlap; in-order    │
+#  │ Linux_3x_4x     │ last   │ F3->F2->F1 │ Last frag wins overlap; any order    │
+#  │ Windows_XP      │ last   │ F2->F1->F3 │ Last frag wins; out-of-order         │
+#  │ Windows_7_10    │ first  │ F1->F3->F2 │ First frag wins; RFC 791 preferred   │
+#  │ Windows_2008    │ first  │ F1->F2->F3 │ First frag wins; drops heavy overlaps│
+#  │ BSD_FreeBSD     │ first  │ F1->F2->F3 │ First frag wins; strict first-arrival│
+#  │ macOS           │ first  │ F1->F3->F2 │ First frag wins (BSD inherit)        │
+#  │ Cisco_IOS       │ last   │ F3->F1->F2 │ Last frag wins; out-of-order ok      │
+#  │ Juniper_JunOS   │ first  │ F1->F2->F3 │ First frag wins; drops dup offsets   │
+#  │ Solaris         │ last   │ F2->F3->F1 │ Last frag wins; tolerant of reorder  │
+#  │ HP_UX           │ first  │ F1->F2->F3 │ First frag wins; drops overlaps      │
+#  │ AIX             │ last   │ F3->F2->F1 │ Last frag wins; any order accepted   │
+#  └─────────────────┴────────┴─────────────┴──────────────────────────────────────┘
+# Policy: first = F1 data kept at overlap | last = F2 data overwrites F1
 fragment_order_os_list = [
-    "Linux_2x",
-    "Linux_3x_4x",
-    "Windows_XP",
-    "Windows_7_10",
-    "Windows_2008",
-    "BSD_FreeBSD",
-    "macOS",
-    "Cisco_IOS",
-    "Juniper_JunOS",
-    "Solaris",
-    "HP_UX",
-    "AIX",
+    "Linux_2x", "Linux_3x_4x", "Windows_XP", "Windows_7_10",
+    "Windows_2008", "BSD_FreeBSD", "macOS", "Cisco_IOS",
+    "Juniper_JunOS", "Solaris", "HP_UX", "AIX",
 ]
 
 # Custom order tuples (used only when fragment_order_mode="custom")
-# 0=F1, 1=F2, 2=F3 → (2,1,0) = send F3 first, then F2, then F1
+# 0=F1, 1=F2, 2=F3 — e.g. (2,1,0) = send F3 first, then F2, then F1
 fragment_order_custom = [(0,1,2), (2,1,0), (1,0,2)]
 
 # ================================================================
-#  SECTION C — PROTOCOL ARRAYS
+#  SECTION C — PROTOCOLS
 # ================================================================
 
 # Whitelist = trusted/allowed protocols
 # Used for: Section 1 sweep, F1 in proto overlap, plain packet sweep
-# Port-capable ones (TCP/UDP/SCTP/DCCP) also used for port overlap (4C)
-# Note: ICMP has no port field — excluded from port overlap automatically
+# TCP/UDP/SCTP/DCCP also used for port overlap (Section 4C, L4 only)
+# ICMP excluded from port overlap automatically (no port field)
 whitelist_protocols = {
     1:   "ICMP",
     6:   "TCP",
@@ -184,8 +185,8 @@ whitelist_protocols = {
     33:  "DCCP",   # Datagram Congestion Control Protocol (port-capable)
 }
 
-
-# Forged = unexpected protocols (F2 in proto overlap, Section 2 sweep)
+# Forged = unexpected protocols
+# Used for: Section 2 sweep, F2 in proto overlap (Section 4B)
 forged_protocols = {
     41:  "IPv6-in-IPv4",
     47:  "GRE",
@@ -197,195 +198,184 @@ forged_protocols = {
 }
 
 # ================================================================
-#  SECTION D — LAYER 4 OPTIONS
+#  SECTION D — IP LAYER CONFIG
+#  Options below only activate when payload_layer="ip"
+# ================================================================
+
+# ── IP OPTIONS ───────────────────────────────────────────────────
+# 3 accepted formats:
+#   Format 1 — Scapy named objects : [IPOption_RR()]
+#   Format 2 — IPOption(bytes) list: [IPOption(b'\x01\x01\x01\x00')]
+#   Format 3 — raw bytes direct    : b'\x01\x01\x01\x00'
+#
+# IP Option kind reference:
+#   0x00=EOL  0x01=NOP  0x07=RR  0x44=Timestamp
+#   0x83=LSRR 0x89=SSRR 0x94=SID(obsolete) 0x82=SEC(obsolete)
+ip_options_list = {
+    # ── Scapy named objects ────────────────────────────────────
+    "NoOption"      : [],
+    "RR"            : [IPOption_RR()],
+    "NOP"           : [IPOption_NOP()],
+    "Timestamp"     : [IPOption_Timestamp()],
+    "NOP×4"         : [IPOption_NOP(), IPOption_NOP(),
+                       IPOption_NOP(), IPOption_NOP()],
+    # ── IPOption(bytes) format ─────────────────────────────────
+    "Raw_NOP3_EOL"  : [IPOption(b'\x01\x01\x01\x00')],
+    "Raw_TS_8B"     : [IPOption(b'\x44\x08\x05\x00' + b'\x00'*4)],
+    "Raw_RR_7B"     : [IPOption(b'\x07\x07\x04' + b'\x00'*4)],
+    "Raw_LSRR_7B"   : [IPOption(b'\x83\x07\x04' + b'\x00'*4)],
+    "Raw_bogus_FF"  : [IPOption(b'\xff\x04\x00\x00')],
+    # ── bytes direct format ────────────────────────────────────
+    "Bytes_NOP4"    : b'\x01\x01\x01\x00',
+    "Bytes_custom"  : b'\x94\x04\x00\x00',
+    "Bytes_bogus"   : b'\xde\xad\xbe\xef',
+}
+
+# ── IHL (IP Header Length) BOGUS VALUES ──────────────────────────
+# Valid range: 5 – 15  (5×4=20B min header, 15×4=60B max with options)
+# Hint:
+#   5  = normal no-option header
+#   6  = claims 24B (with one 4B option word)
+#   15 = claims 60B (maximum)
+#   0  = bogus zero (triggers parser errors)
+#   4  = below minimum (less than 20B)
+ihl_list = [
+    5,    # normal
+    6,    # one option word claimed
+    15,   # maximum claimed
+    0,    # bogus zero
+    4,    # below minimum
+]
+
+# ================================================================
+#  SECTION E — L4 LAYER CONFIG
+#  Options below only activate when payload_layer="l4"
 # ================================================================
 
 # ── BOGUS LENGTH ─────────────────────────────────────────────────
-# Injects intentionally wrong length/offset fields per protocol:
-#
-# TCP  → no separate length field; uses dataofs (header length in 32-bit words)
-#        TCP dataofs valid range : 5 – 15  (5×4=20B min header, 15×4=60B max)
-#        bogus_length_list values used as TCP dataofs via raw struct injection
-#
-# UDP  → length field covers header + data
-#        UDP length valid range  : 8 – 65535
-#
-# SCTP → chunk length field
-#        SCTP valid range        : 12 – 65535
-#
-# DCCP → header length field
-#        DCCP valid range        : 12 – 65535
-#
-# Each entry: (value, label) — label shown in output
+# TCP  → no length field — injects bogus dataofs (header offset words)
+#        TCP dataofs valid range: 5–15 (5×4=20B min, 15×4=60B max)
+# UDP  → bogus length field (header + data)
+#        UDP length valid range : 8–65535
+# SCTP → chunk length; valid range: 12–65535
+# DCCP → header length; valid range: 12–65535
+# Format: (value, label) — label shown in output
 bogus_length_list = [
-    (0,     "zero-invalid"),          # clearly invalid for all protos
-    (1,     "below-all-minimums"),    # below UDP min(8) and TCP min(5)
-    (4,     "below-TCP-dataofs-min"), # TCP dataofs min=5; 4 = invalid
-    (7,     "below-UDP-min"),         # one below UDP minimum (8)
-    (19,    "below-TCP-20B-header"),  # below TCP 20B header (dataofs=5)
-    (65535, "max-valid"),             # maximum 16-bit value
-    (65536, "overflow-16bit"),        # overflows 16-bit → wraps on some stacks
-    (9999,  "mid-bogus"),             # arbitrary mid-range bogus
+    (0,     "zero-invalid"),
+    (1,     "below-all-minimums"),
+    (4,     "below-TCP-dataofs-min"),
+    (7,     "below-UDP-min"),
+    (19,    "below-TCP-20B-header"),
+    (65535, "max-valid"),
+    (65536, "overflow-16bit"),
+    (9999,  "mid-bogus"),
 ]
 
 # ── TCP FLAGS ────────────────────────────────────────────────────
 # Flag bits: F=FIN S=SYN R=RST P=PSH A=ACK U=URG E=ECE C=CWR
 # Hint:
-#   "S"         = SYN only (normal connect)
-#   "A"         = ACK only (stateless fw bypass)
-#   "SA"        = SYN+ACK
-#   "FA"        = FIN+ACK
-#   "R"         = RST
-#   "SF"        = SYN+FIN (invalid — scanning evasion)
-#   "PA"        = PSH+ACK (data push)
-#   "FSRPAUEC"  = ALL flags (Xmas scan)
-#   ""          = no flags (NULL scan)
-#   "FPU"       = FIN+PSH+URG (Xmas variant)
-#   0x29        = SYN+URG+FIN (bitmask)
+#   "S"        = SYN only (normal connect)
+#   "A"        = ACK only (stateless fw bypass)
+#   "SA"       = SYN+ACK
+#   "FA"       = FIN+ACK
+#   "R"        = RST
+#   "SF"       = SYN+FIN (invalid — scanning evasion)
+#   "PA"       = PSH+ACK
+#   "FSRPAUEC" = ALL flags (Xmas scan)
+#   ""         = no flags (NULL scan)
+#   "FPU"      = FIN+PSH+URG (Xmas variant)
+#   0x29       = SYN+URG+FIN (bitmask)
 tcp_flag_list = [
     "S", "A", "SA", "FA", "R", "SF",
     "PA", "FSRPAUEC", "", "FPU", 0x29,
 ]
 
-# ── TCP ADVANCED FIELDS ─────────────────────────────────────────
-# Individual on/off flags (top of script):
-#   enable_tcp_dataofs / enable_tcp_urgptr / enable_tcp_options
-#   enable_ihl / enable_ip_options
-# These craft unusual TCP header field values to confuse
-# firewalls, IDS, and middleboxes during inspection
-
-# TCP Data Offset (dataofs) — header length in 32-bit words
-# Valid range: 5 – 15  (5×4=20B min header, 15×4=60B max with options)
+# ── TCP DATA OFFSET (dataofs) ────────────────────────────────────
+# Header length in 32-bit words; valid range: 5–15
 # Hint:
-#   5  = normal 20B header (no options)
-#   6  = 24B (4B options)
-#   15 = 60B (40B options, maximum)
-#   0  = bogus zero (clearly invalid)
-#   3  = too small (below 5 min)
-#   255= way out of range
+#   5   = normal 20B header (no options)
+#   15  = maximum valid (60B header)
+#   0   = bogus zero
+#   3   = below minimum
+#   255 = out-of-range overflow
 tcp_dataofs_list = [
     5,    # normal (20B header, no options)
     6,    # claims 24B (4B options)
     10,   # claims 40B (20B options)
     15,   # maximum valid (60B header)
     0,    # bogus zero
-    3,    # below minimum (less than 20B)
+    3,    # below minimum
     255,  # out-of-range overflow
 ]
 
-# TCP Data Offset Mismatch — dataofs claims N bytes but actual options differ
+# ── TCP DATAOFS MISMATCH ─────────────────────────────────────────
+# dataofs claims X bytes but actual options size differs → parser confusion
 # Format: (dataofs_value, tcp_options, label)
-# Purpose: dataofs says header is X bytes but options field is a different size
-#          → parser confusion, IDS evasion, reassembly issues
-#
-# How mismatch works:
-#   dataofs=5  (claims 20B header) but options=[MSS(4B)] → actual=24B → MISMATCH
-#   dataofs=10 (claims 40B header) but options=[] → actual=20B → MISMATCH
-#   dataofs=15 (claims 60B header) but only 4B options → actual=24B → MISMATCH
-#
 # Hint — dataofs valid range: 5–15 (5×4=20B, 15×4=60B)
 tcp_dataofs_mismatch_list = [
-    # (dataofs, options,              label)
-    (5,  [("MSS",1460)],             "dofs=20B_opts=24B"),   # claims less than actual
-    (5,  [("NOP",None)]*10,          "dofs=20B_opts=30B"),   # claims far less
-    (10, [],                          "dofs=40B_opts=20B"),   # claims more than actual
-    (15, [("MSS",1460)],             "dofs=60B_opts=24B"),   # max claim, tiny opts
-    (15, [],                          "dofs=60B_opts=20B"),   # max claim, no opts
-    (6,  [],                          "dofs=24B_opts=20B"),   # one word over, no opts
-    (3,  [("MSS",1460)],             "dofs=12B_invalid"),    # below minimum + opts
-    (0,  [("NOP",None),("NOP",None)],"dofs=0_opts=22B"),     # zero + padding
+    (5,  [("MSS",1460)],              "dofs=20B_opts=24B"),
+    (5,  [("NOP",None)]*10,           "dofs=20B_opts=30B"),
+    (10, [],                           "dofs=40B_opts=20B"),
+    (15, [("MSS",1460)],              "dofs=60B_opts=24B"),
+    (15, [],                           "dofs=60B_opts=20B"),
+    (6,  [],                           "dofs=24B_opts=20B"),
+    (3,  [("MSS",1460)],              "dofs=12B_invalid"),
+    (0,  [("NOP",None),("NOP",None)], "dofs=0_opts=22B"),
 ]
 
-# TCP Urgent Pointer — only meaningful when URG flag set
-# Valid range: 0 – 65535
+# ── TCP URGENT POINTER ───────────────────────────────────────────
+# Valid range: 0–65535; meaningful only when URG flag set
 # Hint:
 #   0     = no urgent data (normal)
-#   1     = one byte urgent
+#   1     = minimal urgent
 #   100   = typical urgent window
-#   65535 = maximum pointer (points beyond segment)
-#   0xdead= bogus value (testing parser)
+#   65535 = maximum pointer
+#   0xdead= bogus value
 tcp_urgptr_list = [
-    0,       # no urgent data
-    1,       # minimal urgent
-    100,     # typical
-    65535,   # max pointer
-    0xdead,  # bogus
+    0, 1, 100, 65535, 0xdead,
 ]
 
-# TCP Options — 3 accepted formats:
-#
-#   Format 1 — Scapy tuple list (standard):
-#     [("MSS",1460), ("NOP",None), ("WScale",6)]
-#
-#   Format 2 — Raw bytes (injected directly, bypasses Scapy parser):
-#     b'\x08\x0a\x00\x00\x00\x01\x00\x00\x00\x00'
-#     → kind=8 (Timestamp), len=10, tsval=1, tsecr=0
-#
-#   Format 3 — Mixed list of tuples (standard only, raw handled via F2):
-#     [("NOP",None), ("MSS",1460)]
+# ── TCP OPTIONS ──────────────────────────────────────────────────
+# 2 accepted formats:
+#   Format 1 — Scapy tuple list: [("MSS",1460), ("NOP",None)]
+#   Format 2 — Raw bytes       : b'\x08\x0a\x00\x00\x00\x01\x00\x00\x00\x00'
 #
 # Valid TCP option kinds:
-#   0   = EOL  (End of Option List)
-#   1   = NOP  (padding, 1 byte)
-#   2   = MSS  — 4B: \x02\x04 + value(2B)
-#   3   = WScale — 3B: \x03\x03 + shift(1B)
-#   4   = SAckOK — 2B: \x04\x02
-#   5   = SACK — variable
-#   8   = Timestamp — 10B: \x08\x0a + tsval(4B) + tsecr(4B)
-#   254 = Experimental (RFC4727)
+#   0=EOL  1=NOP  2=MSS(4B)  3=WScale(3B)  4=SAckOK(2B)
+#   8=Timestamp(10B)  254=Experimental
 tcp_options_list = [
     # ── Scapy tuple format ─────────────────────────────────────
-    [("NOP",None),("NOP",None)],                           # padding only
-    [("MSS",1460)],                                        # normal MSS
-    [("MSS",0)],                                           # bogus MSS zero
-    [("MSS",65535)],                                       # max MSS
-    [("WScale",0)],                                        # window scale 0
-    [("WScale",14)],                                       # window scale max valid
-    [("SAckOK",b"")],                                      # SACK permitted
-    [("Timestamp",(0,0))],                                 # timestamp zero
-    [("Timestamp",(0xffffffff,0xffffffff))],               # timestamp max
-    [("NOP",None),("NOP",None),("MSS",1460),("WScale",6)], # combined normal
-    [(254, b"\xde\xad")],                                  # experimental bogus
-    [(0,  b"")],                                           # EOL only
-    # ── Raw bytes format (direct injection) ────────────────────
-    b'\x08\x0a\x00\x00\x00\x01\x00\x00\x00\x02',          # Timestamp raw: tsval=1 tsecr=2
-    b'\x02\x04\x05\xb4',                                   # MSS=1460 raw
-    b'\x03\x03\x08',                                       # WScale=8 raw
-    b'\x04\x02',                                           # SAckOK raw
-    b'\x00',                                               # EOL raw (1 byte)
-    b'\x01\x01\x01\x01',                                   # 4× NOP raw
-    b'\xde\xad\xbe\xef',                                   # completely bogus raw
-]
-
-# IP Header Length (IHL) — in 32-bit words
-# Valid range: 5 – 15  (5=20B min, 15=60B max with options)
-# Note: IHL mismatch from actual header can confuse parsers
-# Hint:
-#   5  = normal no-option header
-#   6  = claims 24B (with options)
-#   15 = claims 60B (max)
-#   0  = bogus (triggers parser errors)
-#   4  = below minimum (less than 20B)
-ihl_list = [
-    5,    # normal
-    6,    # one option word claimed
-    15,   # max claimed
-    0,    # bogus zero
-    4,    # below minimum
+    [("NOP",None),("NOP",None)],
+    [("MSS",1460)],
+    [("MSS",0)],
+    [("MSS",65535)],
+    [("WScale",0)],
+    [("WScale",14)],
+    [("SAckOK",b"")],
+    [("Timestamp",(0,0))],
+    [("Timestamp",(0xffffffff,0xffffffff))],
+    [("NOP",None),("NOP",None),("MSS",1460),("WScale",6)],
+    [(254, b"\xde\xad")],
+    [(0,  b"")],
+    # ── Raw bytes format ───────────────────────────────────────
+    b'\x08\x0a\x00\x00\x00\x01\x00\x00\x00\x02',
+    b'\x02\x04\x05\xb4',
+    b'\x03\x03\x08',
+    b'\x04\x02',
+    b'\x01\x01\x01\x01',
+    b'\xde\xad\xbe\xef',
 ]
 
 # ================================================================
-#  SECTION E — OVERLAP SETTINGS
-#  Note: ALL overlap sections (4A/4B/4C) need "Fragment" in
-#        fragment_mode_list — auto-skip if Fragment disabled
+#  SECTION F — OVERLAP CONFIG
 # ================================================================
 
-# ── PAYLOAD PATTERN NAMES — USER SELECTS FROM LIST ───────────────
-# Script generates actual bytes from name + size automatically
+# ── PAYLOAD PATTERN NAMES ────────────────────────────────────────
+# User selects pattern names — script generates bytes from name+size
 # Size comes from payload_size_list (Section A)
-# Pattern × Size = matrix of all combinations
+# Pattern × Size = matrix of all test combinations
 #
-# Available pattern names:
+# Available names:
 #   "zero"        → all 0x00 bytes               (numeric)
 #   "max"         → all 0xFF bytes               (numeric)
 #   "alpha_A"     → all 0x41 ('A') bytes         (alpha)
@@ -402,37 +392,25 @@ ihl_list = [
 #   "shellcode"   → NOP×4 + INT3 repeat          (shellcode)
 #   "format_str"  → %x%x%x%x%n%s repeat          (format string)
 #   "random"      → os.urandom(size) each call   (random)
-#
-# Add names to use them — script generates bytes at runtime:
 payload_pattern_names = [
-    "zero",
-    "max",
-    "alpha_A",
-    "alpha_B",
-    "numeric_inc",
-    "numeric_dec",
-    "hex_dead",
-    "hex_cafe",
-    "mixed_1",
-    "mixed_2",
-    "shellcode",
-    "format_str",
+    "zero", "max", "alpha_A", "alpha_B",
+    "numeric_inc", "numeric_dec",
+    "hex_dead", "hex_cafe",
+    "mixed_1", "mixed_2",
+    "shellcode", "format_str",
 ]
 
-# overlap_pairs: None = auto-generate from payload_pattern_names × sizes
-# Manual override: overlap_pairs = {"custom": (b"\x41"*48, b"\x42"*48)}
+# ── PAYLOAD OVERLAP PAIRS (Section 4A) ───────────────────────────
+# None = auto-generate all unique pairs from payload_pattern_names
+#        where bytes 8-15 differ (real conflict check)
+# Manual: overlap_pairs = {"custom": (b"\x41"*48, b"\x42"*48)}
 overlap_pairs = None
 
-# ── PROTOCOL OVERLAP (Section 4B) ───────────────────────────────
-# Auto-generated from whitelist_protocols × forged_protocols
-# F1 = whitelist proto (firewall ALLOW) | F2 = forged proto (bypass)
-# OS send order from fragment_order_os_list decides first/last policy
-
-# ── PORT OVERLAP (Section 4C) ────────────────────────────────────
-# Port-capable protocols from whitelist_protocols (TCP/UDP/SCTP/DCCP)
+# ── PORT OVERLAP (Section 4C — L4 layer only) ────────────────────
+# Transport: port-capable protocols from whitelist (TCP/UDP/SCTP/DCCP)
 # ICMP excluded automatically (no port field)
-# "all" = all port-capable whitelist protocols | "TCP" | "UDP" | "SCTP" | "DCCP"
-port_overlap_transport = "all"
+# "all" = all port-capable whitelist protocols
+port_overlap_transport = "all"   # "all"|"TCP"|"UDP"|"SCTP"|"DCCP"
 
 # Whitelist ports = F1 trusted (firewall sees → ALLOW)
 whitelist_ports = [
@@ -460,57 +438,9 @@ forged_ports = [
 ]
 
 # None = auto-generate whitelist × forged pairs
-# Manual override: port_overlap_pairs = {"p80_vs_4444": (80, 4444)}
+# Manual: port_overlap_pairs = {"p80_vs_4444": (80, 4444)}
 port_overlap_pairs = None
 
-# ================================================================
-#  SECTION F — IP OPTIONS (Section 5 combo)
-# ================================================================
-# 3 accepted formats:
-#
-#   Format 1 — Scapy named objects (standard):
-#     [IPOption_RR()]
-#     [IPOption_NOP(), IPOption_NOP()]
-#
-#   Format 2 — IPOption(bytes) in list (raw bytes wrapped):
-#     [IPOption(b'\x01\x01\x01\x00')]
-#     [IPOption(b'\x44\x04\x05\x00')]   # Timestamp option raw
-#
-#   Format 3 — raw bytes assigned to .options (direct inject):
-#     b'\x01\x01\x01\x00'               # NOP NOP NOP EOL
-#     b'\x07\x0b\x04' + b'\x00'*8       # RR skeleton raw
-#
-# IP Option kind reference:
-#   0x00 = EOL  (End of Option List)
-#   0x01 = NOP  (No Operation / padding)
-#   0x07 = RR   (Record Route)
-#   0x44 = TS   (Timestamp)
-#   0x83 = LSRR (Loose Source Record Route)
-#   0x89 = SSRR (Strict Source Record Route)
-#   0x94 = SID  (Stream ID, obsolete)
-#   0x82 = SEC  (Security, obsolete)
-ip_options_list = {
-    # ── Scapy named objects ────────────────────────────────────
-    "NoOption"      : [],
-    "RR"            : [IPOption_RR()],
-    "NOP"           : [IPOption_NOP()],
-    "Timestamp"     : [IPOption_Timestamp()],
-    "NOP×4"         : [IPOption_NOP(), IPOption_NOP(),
-                       IPOption_NOP(), IPOption_NOP()],
-    # ── IPOption(bytes) format ─────────────────────────────────
-    "Raw_NOP3_EOL"  : [IPOption(b'\x01\x01\x01\x00')],    # 3×NOP + EOL
-    "Raw_TS_bogus"  : [IPOption(b'\x44\x08\x05\x00'       # Timestamp kind+len+ptr+flg
-                                + b'\x00'*4)],             # 8B total (min valid)
-    "Raw_RR_bogus"  : [IPOption(b'\x07\x07\x04'          # RR kind+len+ptr
-                                + b'\x00'*4)],             # 7B total
-    "Raw_LSRR"     : [IPOption(b'\x83\x07\x04'           # LSRR kind+len+ptr
-                                + b'\x00'*4)],             # 7B total
-    "Raw_bogus_FF"  : [IPOption(b'\xff\x04\x00\x00')],    # unknown kind=0xFF
-    # ── bytes direct format (assign to .options) ───────────────
-    "Bytes_NOP4"    : b'\x01\x01\x01\x00',                # 4 bytes: NOP×3+EOL
-    "Bytes_custom"  : b'\x94\x04\x00\x00',                # SID option raw
-    "Bytes_bogus"   : b'\xde\xad\xbe\xef',                # fully bogus
-}
 
 # ================================================================
 #  DERIVED / AUTO-COMPUTED — DO NOT EDIT BELOW THIS LINE
@@ -522,37 +452,128 @@ fragment_mode_list = ["Fragment"] if enable_fragment else ["NoFragment"]
 # Fragment mode guard — used by sections 3/4A/4B/4C
 _frag_enabled = enable_fragment
 
-# Payload layer guard — strictly one layer only
-if payload_layer not in ("ip", "l4"):
+# ── AUTO MODE OVERRIDE ───────────────────────────────────────────
+# When test_key="auto", override ALL settings with built-in auto values
+# User only needs target + ttl_list — everything else is auto-selected
+if test_key == "auto":
+    # Sections — all enabled
+    enable_section1_whitelist  = True
+    enable_section2_forged     = True
+    enable_payload_overlap     = True
+    enable_proto_overlap       = True
+    enable_port_overlap        = True
+
+    # Fragment — both plain and fragment tested
+    enable_fragment            = True   # run as fragment; script will also
+                                        # do plain via test_mode=both
+
+    # Payload layer — test IP layer first, then L4 (sequential in test_mode)
+    # Auto runs both by cycling through each layer sequentially
+    _auto_layers = ["ip", "l4"]
+
+    # Common params — auto values
+    tos_list          = [0x00, 0xB8, 0x88]           # Best-effort, VoIP, Video
+    payload_size_list = [8, 32, 64, 256, 1024]
+    ip_id_mode        = "auto"
+    fragment_size_list= [8, 16, 32, 64, 128]
+    fragment_order_mode = "os"
+    fragment_order_os_list = [                        # Key OS behaviors
+        "Linux_3x_4x", "Windows_XP",
+        "Windows_7_10", "Cisco_IOS", "macOS",
+    ]
+
+    # Protocols — standard set
+    whitelist_protocols = {1:"ICMP", 6:"TCP", 17:"UDP", 132:"SCTP"}
+    forged_protocols    = {47:"GRE", 50:"ESP", 89:"OSPF", 254:"Experimental"}
+
+    # IP layer — auto values (correct + incorrect)
+    enable_ip_options          = True
+    enable_ihl                 = True
+    enable_ip_payload_overlap  = True
+    enable_ip_plain_payload    = True
+    ihl_list                   = [5, 0, 15, 4]       # normal + bogus values
+    ip_options_list            = {                    # common options
+        "NoOption"  : [],
+        "RR"        : [IPOption_RR()],
+        "NOP"       : [IPOption_NOP()],
+        "Timestamp" : [IPOption_Timestamp()],
+    }
+
+    # L4 layer — auto values (correct + incorrect)
+    enable_tcp_flags           = True
+    enable_tcp_options         = True
+    enable_tcp_dataofs         = True
+    enable_tcp_dataofs_mismatch= True
+    enable_tcp_urgptr          = True
+    enable_bogus_length        = True
+    enable_tcp_payload_overlap = True
+    enable_tcp_plain_payload   = True
+    tcp_flag_list              = ["S", "A", "SF", "FSRPAUEC", "", "R"]
+    tcp_dataofs_list           = [5, 0, 15, 3]       # normal + bogus
+    tcp_urgptr_list            = [0, 65535, 0xdead]
+    tcp_options_list           = [                   # common + bogus
+        [("MSS",1460)], [("NOP",None),("NOP",None)],
+        [("Timestamp",(0,0))], b'\xde\xad\xbe\xef',
+    ]
+    tcp_dataofs_mismatch_list  = [                   # key mismatches
+        (5,  [("MSS",1460)], "dofs=20B_opts=24B"),
+        (15, [],             "dofs=60B_opts=20B"),
+        (0,  [("NOP",None)], "dofs=0_opts=22B"),
+    ]
+    bogus_length_list          = [
+        (0, "zero"), (7, "below-UDP-min"),
+        (65535, "max"), (65536, "overflow"),
+    ]
+
+    # Overlap
+    payload_pattern_names = [
+        "zero", "max", "alpha_A", "numeric_inc",
+        "hex_dead", "shellcode", "format_str",
+    ]
+    overlap_pairs   = None           # auto-generate
+    port_overlap_pairs = None        # auto-generate
+    port_overlap_transport = "all"
+    whitelist_ports = [80, 443, 22, 53]
+    forged_ports    = [4444, 8080, 1337]
+
+    # Test mode — both sequential and combination
+    test_mode = "both"
+    test_combination_pairs = [
+        ("bogus_length",    "port_overlap"),
+        ("payload_overlap", "port_overlap"),
+        ("tcp_flags",       "bogus_length"),
+        ("tcp_options",     "tcp_dataofs"),
+        ("proto_overlap",   "payload_overlap"),
+        ("ihl",             "bogus_length"),
+    ]
+
+    print("[AUTO MODE] target and ttl_list used — all other values auto-selected")
+    print(f"[AUTO MODE] target={target}  ttl_list={ttl_list}")
+    print(f"[AUTO MODE] layers=ip+l4 | fragment=True | test_mode=both")
+
+# Validate test_key
+elif test_key != "manual":
+    print(f"[ERROR] test_key must be 'auto' or 'manual', got: '{test_key}'")
+    sys.exit(1)
+
+# Payload layer guard — strictly one layer only (manual mode)
+if test_key == "manual" and payload_layer not in ("ip", "l4"):
     print(f"[ERROR] payload_layer must be 'ip' or 'l4', got: '{payload_layer}'")
     sys.exit(1)
 
-_ip_layer = (payload_layer == "ip")
-_l4_layer = (payload_layer == "l4")
+# Determine which layers to run
+# auto mode → both ip and l4 sequentially
+# manual mode → whichever payload_layer is set
+_run_layers = _auto_layers if test_key == "auto" else [payload_layer]
 
-# Layer-specific enable gates (combine user flag AND layer selection)
-_do_ip_options          = enable_ip_options          and _ip_layer
-_do_ihl                 = enable_ihl                 and _ip_layer
-_do_ip_payload_overlap  = enable_ip_payload_overlap  and _ip_layer
-_do_ip_plain_payload    = enable_ip_plain_payload    and _ip_layer
-_do_tcp_flags           = enable_tcp_flags           and _l4_layer
-_do_tcp_options         = enable_tcp_options         and _l4_layer
-_do_tcp_dataofs         = enable_tcp_dataofs         and _l4_layer
-_do_tcp_dataofs_mismatch= enable_tcp_dataofs_mismatch and _l4_layer
-_do_tcp_urgptr          = enable_tcp_urgptr          and _l4_layer
-_do_bogus_length        = enable_bogus_length        and _l4_layer
-_do_tcp_payload_overlap = enable_tcp_payload_overlap and _l4_layer
-_do_tcp_plain_payload   = enable_tcp_plain_payload   and _l4_layer
-
-# Combination pair filter — skip pairs where needed layer is not active
 _attack_layer = {
     "ihl"               : "ip",
     "ip_options"        : "ip",
     "ip_payload_overlap": "ip",
     "ip_plain_payload"  : "ip",
-    "proto_overlap"     : "common",   # IP protocol field — always applicable
-    "payload_overlap"   : "common",   # payload bytes conflict — always applicable
-    "port_overlap"      : "l4",       # TCP/UDP/SCTP/DCCP port — L4 only
+    "proto_overlap"     : "common",
+    "payload_overlap"   : "common",
+    "port_overlap"      : "l4",
     "tcp_flags"         : "l4",
     "tcp_options"       : "l4",
     "tcp_dataofs"       : "l4",
@@ -561,17 +582,47 @@ _attack_layer = {
     "tcp_payload_overlap":"l4",
 }
 
-def _pair_allowed(a, b):
-    """Return True if both attacks are allowed given current payload_layer"""
-    def ok(atk):
-        layer = _attack_layer.get(atk, "common")
-        if layer == "ip":      return _ip_layer
-        if layer == "l4":      return _l4_layer
-        return True            # common — always ok
-    return ok(a) and ok(b)
+def _apply_layer(layer):
+    """Set global _do_* gates for the given layer ('ip' or 'l4')"""
+    global _ip_layer, _l4_layer
+    global _do_ip_options, _do_ihl, _do_ip_payload_overlap, _do_ip_plain_payload
+    global _do_tcp_flags, _do_tcp_options, _do_tcp_dataofs, _do_tcp_dataofs_mismatch
+    global _do_tcp_urgptr, _do_bogus_length, _do_tcp_payload_overlap, _do_tcp_plain_payload
+    global test_combination_pairs
 
-test_combination_pairs = [(a,b) for a,b in test_combination_pairs
-                          if _pair_allowed(a,b)]
+    _ip_layer = (layer == "ip")
+    _l4_layer = (layer == "l4")
+
+    _do_ip_options          = enable_ip_options          and _ip_layer
+    _do_ihl                 = enable_ihl                 and _ip_layer
+    _do_ip_payload_overlap  = enable_ip_payload_overlap  and _ip_layer
+    _do_ip_plain_payload    = enable_ip_plain_payload    and _ip_layer
+    _do_tcp_flags           = enable_tcp_flags           and _l4_layer
+    _do_tcp_options         = enable_tcp_options         and _l4_layer
+    _do_tcp_dataofs         = enable_tcp_dataofs         and _l4_layer
+    _do_tcp_dataofs_mismatch= enable_tcp_dataofs_mismatch and _l4_layer
+    _do_tcp_urgptr          = enable_tcp_urgptr          and _l4_layer
+    _do_bogus_length        = enable_bogus_length        and _l4_layer
+    _do_tcp_payload_overlap = enable_tcp_payload_overlap and _l4_layer
+    _do_tcp_plain_payload   = enable_tcp_plain_payload   and _l4_layer
+
+    def _pair_ok(a, b):
+        def ok(atk):
+            lyr = _attack_layer.get(atk, "common")
+            if lyr == "ip": return _ip_layer
+            if lyr == "l4": return _l4_layer
+            return True
+        return ok(a) and ok(b)
+
+    test_combination_pairs = [
+        (a,b) for a,b in _base_combination_pairs if _pair_ok(a,b)
+    ]
+
+# Save original combo pairs before filtering
+_base_combination_pairs = list(test_combination_pairs)
+
+# Apply first layer immediately (so all _do_* vars are defined)
+_apply_layer(_run_layers[0])
 
 # Auto-align fragment sizes to multiples of 8
 fragment_size_list = sorted(set(max(8,(f//8)*8) for f in fragment_size_list))
@@ -886,37 +937,19 @@ if os.geteuid() != 0:
     sys.exit(1)
 
 print("\n" + "="*100)
-print("  FRAGMENT + OVERLAP SCANNER v5")
+print("  FRAGMENT + OVERLAP ATTACK SCANNER v5")
+print(f"  test_key            : {test_key}  ← 'auto'=fully automatic | 'manual'=user config")
 print(f"  target              : {target}")
-print(f"  enable_fragment     : {enable_fragment}   ← True=Fragment | False=Plain; S3/4A/4B/4C need True")
-print(f"  fragment_mode_list  : {fragment_mode_list}  (auto from enable_fragment)")
-print(f"  fragment_order_mode : {fragment_order_mode}  os_list={fragment_order_os_list if fragment_order_mode=='os' else 'N/A'}")
-print(f"  ip_id_mode          : {ip_id_mode}")
-print(f"  ── ON/OFF ──")
-print(f"  Section 1 whitelist : {enable_section1_whitelist}")
-print(f"  Section 2 forged    : {enable_section2_forged}")
-print(f"  Tiny frag (RFC1858) : auto — covered by fragsize=8 in fragment_size_list when Fragment enabled")
-print(f"  Section 4A payload  : {enable_payload_overlap}")
-print(f"    ip_payload_overlap : {enable_ip_payload_overlap}  tcp_payload_overlap: {enable_tcp_payload_overlap}")
-print(f"    ip_plain_payload   : {enable_ip_plain_payload}  tcp_plain_payload  : {enable_tcp_plain_payload}")
-print(f"  payload_pattern_names: {payload_pattern_names}")
-print(f"  payload_size_list    : {payload_size_list}")
-print(f"  payload matrix       : {len(payload_pattern_names)} patterns × {len(payload_size_list)} sizes = {len(payload_pattern_names)*len(payload_size_list)} combinations")
-print(f"  overlap_pairs        : {len(overlap_pairs)} (auto from pattern names, conflict-checked)")
-print(f"  Section 4B protocol : {enable_proto_overlap}")
-print(f"  Section 4C port     : {enable_port_overlap}")
-print(f"  payload_layer       : {payload_layer}  ← 'ip' or 'l4' (strictly one)")
-print(f"  ── IP layer active  : {_ip_layer}  → ihl={_do_ihl} ip_opts={_do_ip_options} ip_ovlp={_do_ip_payload_overlap}")
-print(f"  ── L4 layer active  : {_l4_layer}  → tcp_flags={_do_tcp_flags} tcp_opts={_do_tcp_options} bogus_len={_do_bogus_length}")
-print(f"  test_mode           : {test_mode}  ← sequential | combination | both")
-print(f"  combo pairs active  : {len(test_combination_pairs)} (auto-filtered by payload_layer)")
-print(f"  Bogus length        : {enable_bogus_length}")
-print(f"  TCP flags           : {enable_tcp_flags}")
-print(f"  TCP options         : {enable_tcp_options}")
-print(f"  TCP data offset     : {enable_tcp_dataofs}")
-print(f"  TCP urgent pointer  : {enable_tcp_urgptr}")
-print(f"  IP options (S5)     : {enable_ip_options}")
-print(f"  IP IHL bogus        : {enable_ihl}")
+print(f"  ttl_list            : {ttl_list}")
+print(f"  enable_fragment     : {enable_fragment}")
+print(f"  layers to run       : {_run_layers}  ({'auto: ip+l4 sequential' if test_key=='auto' else 'manual: one layer'})")
+print(f"  fragment_order_mode : {fragment_order_mode}")
+print(f"  test_mode           : {test_mode}")
+print(f"  payload_patterns    : {payload_pattern_names}")
+print(f"  payload_sizes       : {payload_size_list}")
+print(f"  overlap_pairs       : {len(overlap_pairs)} (auto-generated)")
+print(f"  ── SECTIONS ── S1={enable_section1_whitelist} S2={enable_section2_forged} "
+      f"4A={enable_payload_overlap} 4B={enable_proto_overlap} 4C={enable_port_overlap}")
 print("="*100)
 
 def skip(sec, reason="disabled"):
@@ -925,463 +958,476 @@ def skip(sec, reason="disabled"):
     print("="*100)
 
 # ================================================================
-#  SECTION 1: WHITELIST PROTOCOL SWEEP
+#  LAYER LOOP — runs all sections once per layer
+#  auto mode  → runs ip layer then l4 layer (both complete)
+#  manual mode→ runs payload_layer once only
 # ================================================================
-if not enable_section1_whitelist:
-    skip("SECTION 1: WHITELIST SWEEP")
-else:
-    print("\n" + "="*100)
-    print("  SECTION 1: WHITELIST PROTOCOL SWEEP")
-    print("  Each attack type runs completely before the next")
-    print("="*100)
+for _current_layer in _run_layers:
+    _apply_layer(_current_layer)
+    print("\n" + "#"*100)
+    print(f"  LAYER: {_current_layer.upper()}  ({'IP Layer — IHL/IP Options/IP payload' if _current_layer=='ip' else 'L4 Layer — TCP flags/options/dataofs/ports/bogus-len'})")
+    print("#"*100)
 
-    # ── 1-1: PLAIN PACKET SWEEP (non-frag) ──────────────────────
-    if not _frag_enabled:
-        print("\n  [1-1] PLAIN PACKET SWEEP")
-        for proto_num,proto_name in whitelist_protocols.items():
-            for pname in payload_pattern_names:
-                for size in payload_size_list:
-                    pay = gen_payload(pname, size)
+        # ================================================================
+        #  SECTION 1: WHITELIST PROTOCOL SWEEP
+        # ================================================================
+    if not enable_section1_whitelist:
+        skip("SECTION 1: WHITELIST SWEEP")
+    else:
+        print("\n" + "="*100)
+        print("  SECTION 1: WHITELIST PROTOCOL SWEEP")
+        print("  Each attack type runs completely before the next")
+        print("="*100)
+
+        # ── 1-1: PLAIN PACKET SWEEP (non-frag) ──────────────────────
+        if not _frag_enabled:
+            print("\n  [1-1] PLAIN PACKET SWEEP")
+            for proto_num,proto_name in whitelist_protocols.items():
+                for pname in payload_pattern_names:
+                    for size in payload_size_list:
+                        pay = gen_payload(pname, size)
+                        for ttl in ttl_list:
+                            for tos in tos_list:
+                                for ip_id in get_ip_id():
+                                    pkt=make_ip(target,ttl,tos,proto_num,ip_id=ip_id)/Raw(pay)
+                                    send_pkt(proto_num,f"{proto_name}-{pname}-{size}B","plain","-",pkt)
+
+            # ── 1-2: IP OPTIONS PLAIN SWEEP ─────────────────────────
+            if _do_ip_options:
+                print("\n  [1-2] IP OPTIONS PLAIN SWEEP")
+                for opt_name,opt_value in ip_options_list.items():
+                    for proto_num,proto_name in whitelist_protocols.items():
+                        for pname in payload_pattern_names:
+                            for size in payload_size_list:
+                                pay = gen_payload(pname, size)
+                                for ttl in ttl_list:
+                                    for tos in tos_list:
+                                        for ip_id in get_ip_id():
+                                            pkt=make_ip_with_options(target,ttl,tos,proto_num,
+                                                        opt_value,ip_id=ip_id)/Raw(pay)
+                                            send_pkt(proto_num,f"{proto_name}-{opt_name}-{pname}-{size}B",
+                                                     f"opt={opt_name}","-",pkt)
+
+            # ── 1-3: TCP FLAG SWEEP (plain) ─────────────────────────
+            if _do_tcp_flags:
+                print("\n  [1-3] TCP FLAG SWEEP (plain)")
+                for flg in tcp_flag_list:
                     for ttl in ttl_list:
                         for tos in tos_list:
                             for ip_id in get_ip_id():
-                                pkt=make_ip(target,ttl,tos,proto_num,ip_id=ip_id)/Raw(pay)
-                                send_pkt(proto_num,f"{proto_name}-{pname}-{size}B","plain","-",pkt)
+                                pkt=make_ip(target,ttl,tos,6,ip_id=ip_id)/TCP(flags=flg)
+                                send_pkt("TCP",f"flags={flg}","tcp-flag","-",pkt)
 
-        # ── 1-2: IP OPTIONS PLAIN SWEEP ─────────────────────────
-        if _do_ip_options:
-            print("\n  [1-2] IP OPTIONS PLAIN SWEEP")
-            for opt_name,opt_value in ip_options_list.items():
-                for proto_num,proto_name in whitelist_protocols.items():
-                    for pname in payload_pattern_names:
-                        for size in payload_size_list:
-                            pay = gen_payload(pname, size)
-                            for ttl in ttl_list:
-                                for tos in tos_list:
-                                    for ip_id in get_ip_id():
-                                        pkt=make_ip_with_options(target,ttl,tos,proto_num,
-                                                    opt_value,ip_id=ip_id)/Raw(pay)
-                                        send_pkt(proto_num,f"{proto_name}-{opt_name}-{pname}-{size}B",
-                                                 f"opt={opt_name}","-",pkt)
-
-        # ── 1-3: TCP FLAG SWEEP (plain) ─────────────────────────
-        if _do_tcp_flags:
-            print("\n  [1-3] TCP FLAG SWEEP (plain)")
-            for flg in tcp_flag_list:
-                for ttl in ttl_list:
-                    for tos in tos_list:
-                        for ip_id in get_ip_id():
-                            pkt=make_ip(target,ttl,tos,6,ip_id=ip_id)/TCP(flags=flg)
-                            send_pkt("TCP",f"flags={flg}","tcp-flag","-",pkt)
-
-        # ── 1-4: TCP DATA OFFSET SWEEP (plain) ──────────────────
-        if _do_tcp_dataofs:
-            print("\n  [1-4] TCP DATA OFFSET SWEEP (plain)")
-            for dofs in tcp_dataofs_list:
-                for ttl in ttl_list:
-                    for tos in tos_list:
-                        for ip_id in get_ip_id():
-                            t=build_tcp_advanced(dataofs=dofs)
-                            pkt=make_ip(target,ttl,tos,6,ip_id=ip_id)/t
-                            send_pkt("TCP",f"dataofs={dofs}","tcp-dataofs","-",pkt)
-
-        # ── 1-4B: TCP DATAOFS MISMATCH SWEEP (plain) ────────────
-        if _do_tcp_dataofs_mismatch:
-            print("\n  [1-4B] TCP DATAOFS MISMATCH SWEEP (plain)")
-            print("  dataofs claims X bytes but actual options size differs")
-            for dofs,opts,label in tcp_dataofs_mismatch_list:
-                for ttl in ttl_list:
-                    for tos in tos_list:
-                        for ip_id in get_ip_id():
-                            try:
-                                import struct as _struct
-                                # Build options bytes
-                                if isinstance(opts, (bytes,bytearray)):
-                                    opt_bytes = opts
-                                elif opts:
-                                    opt_bytes = bytes(TCP(options=opts))[:20]
-                                    opt_bytes = opt_bytes[20:]  # options portion only
-                                else:
-                                    opt_bytes = b""
-                                # Raw TCP header with claimed dataofs but different actual options
-                                dofs_nibble = (dofs & 0xF) << 4
-                                raw_hdr = _struct.pack("!HHIIHHHH",
-                                    1234, 80, 0, 0,
-                                    (dofs_nibble << 8) | 0x02,
-                                    65535, 0, 0)
-                                inner = Raw(load=raw_hdr + opt_bytes + b"\x41"*8)
-                                pkt = make_ip(target,ttl,tos,6,ip_id=ip_id)/inner
-                                send_pkt("MM",f"mismatch-{label}","tcp-mismatch","-",pkt)
-                            except Exception as e:
-                                send_pkt("MM",f"mismatch-{label}-ERR","tcp-mismatch","-",
-                                         make_ip(target,ttl,tos,6,ip_id=ip_id)/TCP())
-
-        # ── 1-5: TCP URGENT POINTER SWEEP (plain) ───────────────
-        if _do_tcp_urgptr:
-            print("\n  [1-5] TCP URGENT POINTER SWEEP (plain)")
-            for urg in tcp_urgptr_list:
-                for ttl in ttl_list:
-                    for tos in tos_list:
-                        for ip_id in get_ip_id():
-                            t=build_tcp_advanced(flags="U",urgptr=urg)
-                            pkt=make_ip(target,ttl,tos,6,ip_id=ip_id)/t
-                            send_pkt("TCP",f"urgptr={urg}","tcp-urgptr","-",pkt)
-
-        # ── 1-6: TCP OPTIONS SWEEP (plain) ──────────────────────
-        if _do_tcp_options:
-            print("\n  [1-6] TCP OPTIONS SWEEP (plain)")
-            for i,opts in enumerate(tcp_options_list):
-                for ttl in ttl_list:
-                    for tos in tos_list:
-                        for ip_id in get_ip_id():
-                            try:
-                                t=build_tcp_advanced(options=opts)
+            # ── 1-4: TCP DATA OFFSET SWEEP (plain) ──────────────────
+            if _do_tcp_dataofs:
+                print("\n  [1-4] TCP DATA OFFSET SWEEP (plain)")
+                for dofs in tcp_dataofs_list:
+                    for ttl in ttl_list:
+                        for tos in tos_list:
+                            for ip_id in get_ip_id():
+                                t=build_tcp_advanced(dataofs=dofs)
                                 pkt=make_ip(target,ttl,tos,6,ip_id=ip_id)/t
-                                send_pkt("TCP",f"opts[{i}]","tcp-opts","-",pkt)
-                            except Exception as e:
-                                send_pkt("TCP",f"opts[{i}]-ERR","tcp-opts","-",
-                                         make_ip(target,ttl,tos,6,ip_id=ip_id)/TCP())
+                                send_pkt("TCP",f"dataofs={dofs}","tcp-dataofs","-",pkt)
 
-        # ── 1-7: IHL BOGUS SWEEP (plain) ────────────────────────
-        if _do_ihl:
-            print("\n  [1-7] IHL BOGUS SWEEP (plain)")
-            for proto_num,proto_name in whitelist_protocols.items():
-                for ihl_val in ihl_list:
-                    for ttl in ttl_list:
-                        for tos in tos_list:
-                            for ip_id in get_ip_id():
-                                pkt=make_ip_ihl(target,ttl,tos,proto_num,
-                                                ihl=ihl_val,ip_id=ip_id)/Raw(b"\x41"*20)
-                                send_pkt(proto_num,f"{proto_name}-ihl={ihl_val}","ihl-bogus","-",pkt)
-
-        # ── 1-8: BOGUS LENGTH SWEEP (plain) ─────────────────────
-        if _do_bogus_length:
-            print("\n  [1-8] BOGUS LENGTH SWEEP (plain)")
-            for proto_num,proto_name in whitelist_protocols.items():
-                for blen,blabel in bogus_length_list:
+            # ── 1-4B: TCP DATAOFS MISMATCH SWEEP (plain) ────────────
+            if _do_tcp_dataofs_mismatch:
+                print("\n  [1-4B] TCP DATAOFS MISMATCH SWEEP (plain)")
+                print("  dataofs claims X bytes but actual options size differs")
+                for dofs,opts,label in tcp_dataofs_mismatch_list:
                     for ttl in ttl_list:
                         for tos in tos_list:
                             for ip_id in get_ip_id():
                                 try:
-                                    if proto_num==6:
-                                        # TCP: no length field — inject bogus dataofs via raw struct
-                                        import struct as _struct
-                                        dofs_nibble = (blen & 0xF) << 4
-                                        raw_tcp = _struct.pack("!HHIIHHHH",
-                                            1234, 80, 0, 0,
-                                            (dofs_nibble << 8) | 0x02,  # SYN flag
-                                            65535, 0, 0)
-                                        inner = Raw(load=raw_tcp + b"\x41"*8)
-                                        tag = f"TCP-dataofs={blen}({blabel})"
-                                    elif proto_num==17:
-                                        blen_safe = blen & 0xFFFF   # wrap to 16-bit
-                                        inner = UDP(len=RawVal(blen_safe))/Raw(b"\x41"*8)
-                                        tag = f"UDP-len={blen}({blabel})"
+                                    import struct as _struct
+                                    # Build options bytes
+                                    if isinstance(opts, (bytes,bytearray)):
+                                        opt_bytes = opts
+                                    elif opts:
+                                        opt_bytes = bytes(TCP(options=opts))[:20]
+                                        opt_bytes = opt_bytes[20:]  # options portion only
                                     else:
-                                        inner = Raw(b"\x41"*8)
-                                        tag = f"{proto_name}-bogus={blen}({blabel})"
-                                    pkt = make_ip(target,ttl,tos,proto_num,ip_id=ip_id)/inner
-                                    send_pkt("BL", tag, "bogus-len", "-", pkt)
+                                        opt_bytes = b""
+                                    # Raw TCP header with claimed dataofs but different actual options
+                                    dofs_nibble = (dofs & 0xF) << 4
+                                    raw_hdr = _struct.pack("!HHIIHHHH",
+                                        1234, 80, 0, 0,
+                                        (dofs_nibble << 8) | 0x02,
+                                        65535, 0, 0)
+                                    inner = Raw(load=raw_hdr + opt_bytes + b"\x41"*8)
+                                    pkt = make_ip(target,ttl,tos,6,ip_id=ip_id)/inner
+                                    send_pkt("MM",f"mismatch-{label}","tcp-mismatch","-",pkt)
                                 except Exception as e:
-                                    send_pkt("BL",f"{proto_name}-err","bogus-len","-",
-                                             make_ip(target,ttl,tos,proto_num,ip_id=ip_id)/Raw(b"\x41"*8))
+                                    send_pkt("MM",f"mismatch-{label}-ERR","tcp-mismatch","-",
+                                             make_ip(target,ttl,tos,6,ip_id=ip_id)/TCP())
 
-    else:
-        # ── 1-A: FRAGMENT PAYLOAD SWEEP ─────────────────────────
-        print("\n  [1-A] FRAGMENT PAYLOAD SWEEP")
-        for proto_num,proto_name in whitelist_protocols.items():
-            for fsize in fragment_size_list:
-                for pname in payload_pattern_names:
-                    pay = gen_payload(pname, fsize*2)
+            # ── 1-5: TCP URGENT POINTER SWEEP (plain) ───────────────
+            if _do_tcp_urgptr:
+                print("\n  [1-5] TCP URGENT POINTER SWEEP (plain)")
+                for urg in tcp_urgptr_list:
                     for ttl in ttl_list:
                         for tos in tos_list:
                             for ip_id in get_ip_id():
-                                frags=fragment(make_ip(target,ttl,tos,proto_num,ip_id=ip_id)/
-                                               Raw(pay), fragsize=fsize)
-                                send_frags(frags, f"{proto_name}-{pname}-{fsize}B")
+                                t=build_tcp_advanced(flags="U",urgptr=urg)
+                                pkt=make_ip(target,ttl,tos,6,ip_id=ip_id)/t
+                                send_pkt("TCP",f"urgptr={urg}","tcp-urgptr","-",pkt)
 
-        # ── 1-B: IP OPTIONS FRAGMENT SWEEP ──────────────────────
-        if _do_ip_options:
-            print("\n  [1-B] IP OPTIONS FRAGMENT SWEEP")
-            for opt_name,opt_value in ip_options_list.items():
+            # ── 1-6: TCP OPTIONS SWEEP (plain) ──────────────────────
+            if _do_tcp_options:
+                print("\n  [1-6] TCP OPTIONS SWEEP (plain)")
+                for i,opts in enumerate(tcp_options_list):
+                    for ttl in ttl_list:
+                        for tos in tos_list:
+                            for ip_id in get_ip_id():
+                                try:
+                                    t=build_tcp_advanced(options=opts)
+                                    pkt=make_ip(target,ttl,tos,6,ip_id=ip_id)/t
+                                    send_pkt("TCP",f"opts[{i}]","tcp-opts","-",pkt)
+                                except Exception as e:
+                                    send_pkt("TCP",f"opts[{i}]-ERR","tcp-opts","-",
+                                             make_ip(target,ttl,tos,6,ip_id=ip_id)/TCP())
+
+            # ── 1-7: IHL BOGUS SWEEP (plain) ────────────────────────
+            if _do_ihl:
+                print("\n  [1-7] IHL BOGUS SWEEP (plain)")
                 for proto_num,proto_name in whitelist_protocols.items():
-                    for fsize in fragment_size_list:
-                        for pname in payload_pattern_names:
-                            pay = gen_payload(pname, fsize*2)
-                            for ttl in ttl_list:
-                                for tos in tos_list:
-                                    for ip_id in get_ip_id():
-                                        try:
-                                            frags=fragment(
-                                                make_ip_with_options(target,ttl,tos,proto_num,
-                                                           opt_value,ip_id=ip_id)/Raw(pay),
-                                                fragsize=fsize)
-                                            send_frags(frags,f"{proto_name}-{opt_name}-{pname}-{fsize}B")
-                                        except Exception as e:
-                                            print(f"  ERROR: {e}")
+                    for ihl_val in ihl_list:
+                        for ttl in ttl_list:
+                            for tos in tos_list:
+                                for ip_id in get_ip_id():
+                                    pkt=make_ip_ihl(target,ttl,tos,proto_num,
+                                                    ihl=ihl_val,ip_id=ip_id)/Raw(b"\x41"*20)
+                                    send_pkt(proto_num,f"{proto_name}-ihl={ihl_val}","ihl-bogus","-",pkt)
 
-        # ── 1-C: TCP FLAG FRAGMENT SWEEP ────────────────────────
-        if _do_tcp_flags:
-            print("\n  [1-C] TCP FLAG FRAGMENT SWEEP")
-            for flg in tcp_flag_list:
-                for ttl in ttl_list:
-                    for tos in tos_list:
-                        for ip_id in get_ip_id():
-                            payload=bytes(TCP(flags=flg))+b"\x41"*32
-                            frags=fragment(make_ip(target,ttl,tos,6,ip_id=ip_id)/
-                                           Raw(payload),fragsize=32)
-                            send_frags(frags, f"TCP-flags={flg}")
+            # ── 1-8: BOGUS LENGTH SWEEP (plain) ─────────────────────
+            if _do_bogus_length:
+                print("\n  [1-8] BOGUS LENGTH SWEEP (plain)")
+                for proto_num,proto_name in whitelist_protocols.items():
+                    for blen,blabel in bogus_length_list:
+                        for ttl in ttl_list:
+                            for tos in tos_list:
+                                for ip_id in get_ip_id():
+                                    try:
+                                        if proto_num==6:
+                                            # TCP: no length field — inject bogus dataofs via raw struct
+                                            import struct as _struct
+                                            dofs_nibble = (blen & 0xF) << 4
+                                            raw_tcp = _struct.pack("!HHIIHHHH",
+                                                1234, 80, 0, 0,
+                                                (dofs_nibble << 8) | 0x02,  # SYN flag
+                                                65535, 0, 0)
+                                            inner = Raw(load=raw_tcp + b"\x41"*8)
+                                            tag = f"TCP-dataofs={blen}({blabel})"
+                                        elif proto_num==17:
+                                            blen_safe = blen & 0xFFFF   # wrap to 16-bit
+                                            inner = UDP(len=RawVal(blen_safe))/Raw(b"\x41"*8)
+                                            tag = f"UDP-len={blen}({blabel})"
+                                        else:
+                                            inner = Raw(b"\x41"*8)
+                                            tag = f"{proto_name}-bogus={blen}({blabel})"
+                                        pkt = make_ip(target,ttl,tos,proto_num,ip_id=ip_id)/inner
+                                        send_pkt("BL", tag, "bogus-len", "-", pkt)
+                                    except Exception as e:
+                                        send_pkt("BL",f"{proto_name}-err","bogus-len","-",
+                                                 make_ip(target,ttl,tos,proto_num,ip_id=ip_id)/Raw(b"\x41"*8))
 
-# ================================================================
-#  SECTION 2: FORGED PROTOCOL SWEEP
-# ================================================================
-if not enable_section2_forged:
-    skip("SECTION 2: FORGED PROTOCOL SWEEP")
-else:
-    print("\n" + "="*100)
-    print("  SECTION 2: FORGED PROTOCOL — Fragment Size Sweep")
-    print("="*100)
-    for frag_mode in fragment_mode_list:
-        for proto_num,proto_name in forged_protocols.items():
-            for tos in tos_list:
-                for ttl in ttl_list:
-                    for ip_id in get_ip_id():
-                        id_tag = f"id={hex(ip_id)}" if ip_id else "id=auto"
-                        print(f"\n  [Mode={frag_mode}|{proto_name}|ToS={hex(tos)}|TTL={ttl}|{id_tag}]")
-                        print_header()
-                        if frag_mode == "NoFragment":
-                            pkt=make_ip(target,ttl,tos,proto_num,ip_id=ip_id)/Raw(b"\x42"*64)
-                            send_pkt(proto_num,f"{proto_name}-plain","plain","-",pkt)
-                        else:
-                            for fsize in fragment_size_list:
-                                for pname in payload_pattern_names:
-                                    pay = gen_payload(pname, fsize*2)
+        else:
+            # ── 1-A: FRAGMENT PAYLOAD SWEEP ─────────────────────────
+            print("\n  [1-A] FRAGMENT PAYLOAD SWEEP")
+            for proto_num,proto_name in whitelist_protocols.items():
+                for fsize in fragment_size_list:
+                    for pname in payload_pattern_names:
+                        pay = gen_payload(pname, fsize*2)
+                        for ttl in ttl_list:
+                            for tos in tos_list:
+                                for ip_id in get_ip_id():
                                     frags=fragment(make_ip(target,ttl,tos,proto_num,ip_id=ip_id)/
                                                    Raw(pay), fragsize=fsize)
                                     send_frags(frags, f"{proto_name}-{pname}-{fsize}B")
 
-# ================================================================
-#  SECTION 3: TINY FRAGMENT ATTACK (RFC 1858)
-#  No separate on/off flag needed:
-#  → Controlled by fragment_mode_list and fragment_size_list
-#  → "Fragment" in fragment_mode_list = fragment attacks enabled
-#  → fragsize=8 in fragment_size_list = tiny fragment covered
-#    (Section 1 already sends 8-byte fragments for all whitelist protos)
-#
-#  This section sends the CLASSIC RFC 1858 form specifically:
-#    F1 = 8 bytes (too small to contain dest port — firewall cannot inspect)
-#    F2 = port hidden at byte offset 8 (firewall misses it)
-#  → Only runs when "Fragment" is in fragment_mode_list
-# ================================================================
-print("\n" + "="*100)
-if not _frag_enabled:
-    print("  SECTION 3: TINY FRAGMENT ATTACK (RFC 1858) — SKIPPED")
-    print("  Reason: enable_fragment = False")
-    print("  To enable: set enable_fragment = True in ON/OFF SWITCHES")
-    print("="*100)
-else:
-    print("  SECTION 3: TINY FRAGMENT ATTACK (RFC 1858)")
-    print("  F1=8B (no port visible) | F2=port hidden at offset 8B")
-    print("  Controlled by: fragment_mode_list + fragment_size_list")
-    print("  (fragsize=8 in Section 1 also covers tiny fragment sweep)")
-    print("="*100)
-    for proto_num,proto_name in whitelist_protocols.items():
-        for ttl in ttl_list:
-            for tos in tos_list:
-                for ip_id in get_ip_id():
-                    id_tag = f"id={hex(ip_id)}" if ip_id else "id=auto"
-                    print(f"\n  [{proto_name}|TTL={ttl}|ToS={hex(tos)}|{id_tag}]")
-                    print_header()
-                    # F1: 8 bytes — sport only, no dport visible to firewall
-                    f1=make_ip(target,ttl,tos,proto_num,ip_id=ip_id,flags="MF",frag=0)/Raw(b"\x00"*8)
-                    # F2: offset=8B — dport=80 starts here (hidden from firewall)
-                    f2=make_ip(target,ttl,tos,proto_num,ip_id=ip_id,flags=0,frag=1)/Raw(b"\x00\x50\x00\x50"+b"\x00"*4)
-                    send_frags([f1,f2], f"{proto_name}-TinyFrag-RFC1858")
+            # ── 1-B: IP OPTIONS FRAGMENT SWEEP ──────────────────────
+            if _do_ip_options:
+                print("\n  [1-B] IP OPTIONS FRAGMENT SWEEP")
+                for opt_name,opt_value in ip_options_list.items():
+                    for proto_num,proto_name in whitelist_protocols.items():
+                        for fsize in fragment_size_list:
+                            for pname in payload_pattern_names:
+                                pay = gen_payload(pname, fsize*2)
+                                for ttl in ttl_list:
+                                    for tos in tos_list:
+                                        for ip_id in get_ip_id():
+                                            try:
+                                                frags=fragment(
+                                                    make_ip_with_options(target,ttl,tos,proto_num,
+                                                               opt_value,ip_id=ip_id)/Raw(pay),
+                                                    fragsize=fsize)
+                                                send_frags(frags,f"{proto_name}-{opt_name}-{pname}-{fsize}B")
+                                            except Exception as e:
+                                                print(f"  ERROR: {e}")
 
-# ================================================================
-#  SECTION 4A: PAYLOAD OVERLAP
-#  OS send order decides first/last policy for overlap zone
-# ================================================================
-if not enable_payload_overlap:
-    skip("SECTION 4A: PAYLOAD OVERLAP", "enable_payload_overlap=False")
-else:
-    print("\n" + "="*100)
-    print("  SECTION 4A: PAYLOAD OVERLAP")
-    print(f"  ip_payload_overlap  : {enable_ip_payload_overlap}   — IP layer fragment overlap attack")
-    print(f"  tcp_payload_overlap : {enable_tcp_payload_overlap}  — TCP layer fragment overlap attack")
-    print(f"  ip_plain_payload    : {enable_ip_plain_payload}   — IP plain payload sweep (non-frag)")
-    print(f"  tcp_plain_payload   : {enable_tcp_plain_payload}  — TCP plain payload sweep (non-frag)")
-    print(f"  overlap pairs       : {len(overlap_pairs)} (auto from payload_patterns)")
-    print("="*100)
-
-    if _frag_enabled:
-        # ── Fragment mode: IP layer payload overlap ──────────────
-        if _do_ip_payload_overlap:
-            print("\n  [4A-IP-OVERLAP: IP layer fragment payload conflict]")
-            for olabel,(pay1,pay2) in overlap_pairs.items():
-                for ttl in ttl_list:
-                    for tos in tos_list:
-                        for ip_id in get_ip_id():
-                            id_tag = f"id={hex(ip_id)}" if ip_id else "id=auto"
-                            print(f"\n  [IP-Ovlp|{olabel}|TTL={ttl}|ToS={hex(tos)}|{id_tag}]")
-                            print(f"  F1[8:12]={pay1[8:12].hex()} | F2[8:12]={pay2[8:12].hex()} | conflict={pay1[8:16]!=pay2[8:16]}")
-                            print_header()
-                            b1,b2=pay1[:48],pay2[:48]
-                            # IP layer: proto=1 (ICMP), pure IP payload overlap
-                            f1=make_ip(target,ttl,tos,1,ip_id=ip_id,flags="MF",frag=0)/Raw(b1[:16])
-                            f2=make_ip(target,ttl,tos,1,ip_id=ip_id,flags="MF",frag=1)/Raw(b2[8:24])
-                            f3=make_ip(target,ttl,tos,1,ip_id=ip_id,flags=0,   frag=2)/Raw(b2[16:32])
-                            send_frags([f1,f2,f3], f"IP-{olabel}")
-        else:
-            print("\n  [4A-IP-OVERLAP] SKIPPED (enable_ip_payload_overlap=False or payload_layer!=ip)")
-
-        # ── Fragment mode: TCP layer payload overlap ─────────────
-        if _do_tcp_payload_overlap:
-            print("\n  [4A-TCP-OVERLAP: TCP layer fragment payload conflict]")
-            for olabel,(pay1,pay2) in overlap_pairs.items():
-                for ttl in ttl_list:
-                    for tos in tos_list:
-                        for ip_id in get_ip_id():
-                            id_tag = f"id={hex(ip_id)}" if ip_id else "id=auto"
-                            print(f"\n  [TCP-Ovlp|{olabel}|TTL={ttl}|ToS={hex(tos)}|{id_tag}]")
-                            print(f"  F1[8:12]={pay1[8:12].hex()} | F2[8:12]={pay2[8:12].hex()} | conflict={pay1[8:16]!=pay2[8:16]}")
-                            print_header()
-                            b1,b2=pay1[:48],pay2[:48]
-                            # TCP layer: proto=6, TCP header + payload overlap
-                            tcp_hdr = bytes(TCP(sport=1234,dport=80,flags="S"))[:20]
-                            f1=make_ip(target,ttl,tos,6,ip_id=ip_id,flags="MF",frag=0)/Raw(tcp_hdr+b1[:16])
-                            f2=make_ip(target,ttl,tos,6,ip_id=ip_id,flags="MF",frag=1)/Raw(b2[8:24])
-                            f3=make_ip(target,ttl,tos,6,ip_id=ip_id,flags=0,   frag=2)/Raw(b2[16:32])
-                            send_frags([f1,f2,f3], f"TCP-{olabel}")
-        else:
-            print("\n  [4A-TCP-OVERLAP] SKIPPED (enable_tcp_payload_overlap=False or payload_layer!=l4)")
-
-    else:
-        # ── Non-fragment: IP plain payload sweep ─────────────────
-        # Matrix: payload_pattern_names × payload_size_list × whitelist_protocols
-        if _do_ip_plain_payload:
-            print("\n  [4A-IP-PLAIN: IP protocol plain payload sweep]")
-            print(f"  patterns={payload_pattern_names} × sizes={payload_size_list}")
-            for pname in payload_pattern_names:
-                for size in payload_size_list:
-                    pay = gen_payload(pname, size)
-                    for pnum,proto_name in whitelist_protocols.items():
-                        for ttl in ttl_list:
-                            for tos in tos_list:
-                                for ip_id in get_ip_id():
-                                    id_tag = f"id={hex(ip_id)}" if ip_id else "id=auto"
-                                    print(f"\n  [IP-Plain|{proto_name}|{pname}|{size}B|TTL={ttl}|ToS={hex(tos)}|{id_tag}]")
-                                    print_header()
-                                    pkt = make_ip(target,ttl,tos,pnum,ip_id=ip_id)/Raw(pay)
-                                    send_pkt(pnum,f"{proto_name}-{pname}-{size}B","ip-plain","-",pkt)
-        else:
-            print("\n  [4A-IP-PLAIN] SKIPPED (enable_ip_plain_payload=False or payload_layer!=ip)")
-
-        # ── Non-fragment: TCP plain payload sweep ────────────────
-        # Matrix: payload_pattern_names × payload_size_list
-        if _do_tcp_plain_payload:
-            print("\n  [4A-TCP-PLAIN: TCP payload plain sweep]")
-            print(f"  patterns={payload_pattern_names} × sizes={payload_size_list}")
-            for pname in payload_pattern_names:
-                for size in payload_size_list:
-                    pay = gen_payload(pname, size)
+            # ── 1-C: TCP FLAG FRAGMENT SWEEP ────────────────────────
+            if _do_tcp_flags:
+                print("\n  [1-C] TCP FLAG FRAGMENT SWEEP")
+                for flg in tcp_flag_list:
                     for ttl in ttl_list:
                         for tos in tos_list:
                             for ip_id in get_ip_id():
-                                id_tag = f"id={hex(ip_id)}" if ip_id else "id=auto"
-                                print(f"\n  [TCP-Plain|{pname}|{size}B|TTL={ttl}|ToS={hex(tos)}|{id_tag}]")
-                                print_header()
-                                pkt = make_ip(target,ttl,tos,6,ip_id=ip_id)/\
-                                      TCP(sport=1234,dport=80,flags="S")/Raw(pay)
-                                send_pkt(6,f"TCP-{pname}-{size}B","tcp-plain","-",pkt)
-        else:
-            print("\n  [4A-TCP-PLAIN] SKIPPED (enable_tcp_plain_payload=False)")
+                                payload=bytes(TCP(flags=flg))+b"\x41"*32
+                                frags=fragment(make_ip(target,ttl,tos,6,ip_id=ip_id)/
+                                               Raw(payload),fragsize=32)
+                                send_frags(frags, f"TCP-flags={flg}")
 
-# ================================================================
-#  SECTION 4B: PROTOCOL OVERLAP
-#  OS send order decides which proto field reassembler uses
-# ================================================================
-if not enable_proto_overlap:
-    skip("SECTION 4B: PROTOCOL OVERLAP", "enable_proto_overlap=False")
-else:
+    # ================================================================
+    #  SECTION 2: FORGED PROTOCOL SWEEP
+    # ================================================================
+    if not enable_section2_forged:
+        skip("SECTION 2: FORGED PROTOCOL SWEEP")
+    else:
+        print("\n" + "="*100)
+        print("  SECTION 2: FORGED PROTOCOL — Fragment Size Sweep")
+        print("="*100)
+        for frag_mode in fragment_mode_list:
+            for proto_num,proto_name in forged_protocols.items():
+                for tos in tos_list:
+                    for ttl in ttl_list:
+                        for ip_id in get_ip_id():
+                            id_tag = f"id={hex(ip_id)}" if ip_id else "id=auto"
+                            print(f"\n  [Mode={frag_mode}|{proto_name}|ToS={hex(tos)}|TTL={ttl}|{id_tag}]")
+                            print_header()
+                            if frag_mode == "NoFragment":
+                                pkt=make_ip(target,ttl,tos,proto_num,ip_id=ip_id)/Raw(b"\x42"*64)
+                                send_pkt(proto_num,f"{proto_name}-plain","plain","-",pkt)
+                            else:
+                                for fsize in fragment_size_list:
+                                    for pname in payload_pattern_names:
+                                        pay = gen_payload(pname, fsize*2)
+                                        frags=fragment(make_ip(target,ttl,tos,proto_num,ip_id=ip_id)/
+                                                       Raw(pay), fragsize=fsize)
+                                        send_frags(frags, f"{proto_name}-{pname}-{fsize}B")
+
+    # ================================================================
+    #  SECTION 3: TINY FRAGMENT ATTACK (RFC 1858)
+    #  No separate on/off flag needed:
+    #  → Controlled by fragment_mode_list and fragment_size_list
+    #  → "Fragment" in fragment_mode_list = fragment attacks enabled
+    #  → fragsize=8 in fragment_size_list = tiny fragment covered
+    #    (Section 1 already sends 8-byte fragments for all whitelist protos)
+    #
+    #  This section sends the CLASSIC RFC 1858 form specifically:
+    #    F1 = 8 bytes (too small to contain dest port — firewall cannot inspect)
+    #    F2 = port hidden at byte offset 8 (firewall misses it)
+    #  → Only runs when "Fragment" is in fragment_mode_list
+    # ================================================================
     print("\n" + "="*100)
-    print(f"  SECTION 4B: PROTOCOL OVERLAP — {len(proto_overlap_pairs)} pairs (whitelist x forged)")
-    print("  Fragment mode  → OS order decides which proto field wins at reassembly")
-    print("  NoFragment mode→ plain sweep per whitelist_protocols (auto)")
-    print("="*100)
-    for plabel,(p1,p1n,p2,p2n) in proto_overlap_pairs.items():
-        for ttl in ttl_list:
-            for tos in tos_list:
-                for ip_id in get_ip_id():
-                    id_tag = f"id={hex(ip_id)}" if ip_id else "id=auto"
-                    print(f"\n  [{plabel}|F1={p1n}({p1})|F2={p2n}({p2})|TTL={ttl}|{id_tag}]")
-                    print_header()
-                    b1,b2=b"\x41"*48,b"\x42"*48
-
-                    if not _frag_enabled:
-                        # NoFragment: auto use whitelist_protocols for plain packets
-                        for pnum,pname in whitelist_protocols.items():
-                            pkt=make_ip(target,ttl,tos,pnum,ip_id=ip_id)/Raw(b1[:32])
-                            send_pkt(pnum,f"{plabel}-{pname}-plain","nofrag-plain","-",pkt)
-                    else:
-                        f1=make_ip(target,ttl,tos,p1,ip_id=ip_id,flags="MF",frag=0)/Raw(b1[:16])
-                        f2=make_ip(target,ttl,tos,p2,ip_id=ip_id,flags="MF",frag=1)/Raw(b2[8:24])
-                        f3=make_ip(target,ttl,tos,p2,ip_id=ip_id,flags=0,   frag=2)/Raw(b2[16:32])
-                        send_frags([f1,f2,f3], plabel)
-
-# ================================================================
-#  SECTION 4C: PORT OVERLAP
-#  OS send order decides which dport reassembler uses
-# ================================================================
-if not enable_port_overlap:
-    skip("SECTION 4C: PORT OVERLAP", "enable_port_overlap=False")
-else:
-    # Build port_transport_list if not already set (NoFragment path)
-    if 'port_transport_list' not in dir():
-        _wl_port2 = {k:v for k,v in whitelist_protocols.items() if k != 1}
-        if port_overlap_transport == "all":
-            port_transport_list = list(_wl_port2.items())
-        else:
-            port_transport_list = [(k,v) for k,v in _wl_port2.items()
-                                   if v == port_overlap_transport]
-        if port_overlap_pairs is None:
-            port_overlap_pairs = {}
-            for wp,fp in product(whitelist_ports, forged_ports):
-                port_overlap_pairs[f"p{wp}_vs_p{fp}"] = (wp,fp)
-
-    print("\n" + "="*100)
-    print(f"  SECTION 4C: PORT OVERLAP — {len(port_overlap_pairs)} pairs | transport={port_overlap_transport}")
-    print("  Fragment mode  → OS order decides which dport wins at reassembly")
-    print("  NoFragment mode→ plain packet per whitelist_protocols with each port pair (auto)")
-    print(f"  whitelist_ports={whitelist_ports}")
-    print(f"  forged_ports   ={forged_ports}")
-    print("="*100)
-    for proto_num,proto_name in port_transport_list:
-        for portlabel,(dp1,dp2) in port_overlap_pairs.items():
+    if not _frag_enabled:
+        print("  SECTION 3: TINY FRAGMENT ATTACK (RFC 1858) — SKIPPED")
+        print("  Reason: enable_fragment = False")
+        print("  To enable: set enable_fragment = True in ON/OFF SWITCHES")
+        print("="*100)
+    else:
+        print("  SECTION 3: TINY FRAGMENT ATTACK (RFC 1858)")
+        print("  F1=8B (no port visible) | F2=port hidden at offset 8B")
+        print("  Controlled by: fragment_mode_list + fragment_size_list")
+        print("  (fragsize=8 in Section 1 also covers tiny fragment sweep)")
+        print("="*100)
+        for proto_num,proto_name in whitelist_protocols.items():
             for ttl in ttl_list:
                 for tos in tos_list:
                     for ip_id in get_ip_id():
                         id_tag = f"id={hex(ip_id)}" if ip_id else "id=auto"
-                        print(f"\n  [{proto_name}|{portlabel}|F1.dp={dp1}|F2.dp={dp2}|TTL={ttl}|{id_tag}]")
+                        print(f"\n  [{proto_name}|TTL={ttl}|ToS={hex(tos)}|{id_tag}]")
                         print_header()
-                        h1=build_l4_hdr(proto_num,dport=dp1)
-                        h2=build_l4_hdr(proto_num,dport=dp2)
+                        # F1: 8 bytes — sport only, no dport visible to firewall
+                        f1=make_ip(target,ttl,tos,proto_num,ip_id=ip_id,flags="MF",frag=0)/Raw(b"\x00"*8)
+                        # F2: offset=8B — dport=80 starts here (hidden from firewall)
+                        f2=make_ip(target,ttl,tos,proto_num,ip_id=ip_id,flags=0,frag=1)/Raw(b"\x00\x50\x00\x50"+b"\x00"*4)
+                        send_frags([f1,f2], f"{proto_name}-TinyFrag-RFC1858")
+
+    # ================================================================
+    #  SECTION 4A: PAYLOAD OVERLAP
+    #  OS send order decides first/last policy for overlap zone
+    # ================================================================
+    if not enable_payload_overlap:
+        skip("SECTION 4A: PAYLOAD OVERLAP", "enable_payload_overlap=False")
+    else:
+        print("\n" + "="*100)
+        print("  SECTION 4A: PAYLOAD OVERLAP")
+        print(f"  ip_payload_overlap  : {enable_ip_payload_overlap}   — IP layer fragment overlap attack")
+        print(f"  tcp_payload_overlap : {enable_tcp_payload_overlap}  — TCP layer fragment overlap attack")
+        print(f"  ip_plain_payload    : {enable_ip_plain_payload}   — IP plain payload sweep (non-frag)")
+        print(f"  tcp_plain_payload   : {enable_tcp_plain_payload}  — TCP plain payload sweep (non-frag)")
+        print(f"  overlap pairs       : {len(overlap_pairs)} (auto from payload_patterns)")
+        print("="*100)
+
+        if _frag_enabled:
+            # ── Fragment mode: IP layer payload overlap ──────────────
+            if _do_ip_payload_overlap:
+                print("\n  [4A-IP-OVERLAP: IP layer fragment payload conflict]")
+                for olabel,(pay1,pay2) in overlap_pairs.items():
+                    for ttl in ttl_list:
+                        for tos in tos_list:
+                            for ip_id in get_ip_id():
+                                id_tag = f"id={hex(ip_id)}" if ip_id else "id=auto"
+                                print(f"\n  [IP-Ovlp|{olabel}|TTL={ttl}|ToS={hex(tos)}|{id_tag}]")
+                                print(f"  F1[8:12]={pay1[8:12].hex()} | F2[8:12]={pay2[8:12].hex()} | conflict={pay1[8:16]!=pay2[8:16]}")
+                                print_header()
+                                b1,b2=pay1[:48],pay2[:48]
+                                # IP layer: proto=1 (ICMP), pure IP payload overlap
+                                f1=make_ip(target,ttl,tos,1,ip_id=ip_id,flags="MF",frag=0)/Raw(b1[:16])
+                                f2=make_ip(target,ttl,tos,1,ip_id=ip_id,flags="MF",frag=1)/Raw(b2[8:24])
+                                f3=make_ip(target,ttl,tos,1,ip_id=ip_id,flags=0,   frag=2)/Raw(b2[16:32])
+                                send_frags([f1,f2,f3], f"IP-{olabel}")
+            else:
+                print("\n  [4A-IP-OVERLAP] SKIPPED (enable_ip_payload_overlap=False or payload_layer!=ip)")
+
+            # ── Fragment mode: TCP layer payload overlap ─────────────
+            if _do_tcp_payload_overlap:
+                print("\n  [4A-TCP-OVERLAP: TCP layer fragment payload conflict]")
+                for olabel,(pay1,pay2) in overlap_pairs.items():
+                    for ttl in ttl_list:
+                        for tos in tos_list:
+                            for ip_id in get_ip_id():
+                                id_tag = f"id={hex(ip_id)}" if ip_id else "id=auto"
+                                print(f"\n  [TCP-Ovlp|{olabel}|TTL={ttl}|ToS={hex(tos)}|{id_tag}]")
+                                print(f"  F1[8:12]={pay1[8:12].hex()} | F2[8:12]={pay2[8:12].hex()} | conflict={pay1[8:16]!=pay2[8:16]}")
+                                print_header()
+                                b1,b2=pay1[:48],pay2[:48]
+                                # TCP layer: proto=6, TCP header + payload overlap
+                                tcp_hdr = bytes(TCP(sport=1234,dport=80,flags="S"))[:20]
+                                f1=make_ip(target,ttl,tos,6,ip_id=ip_id,flags="MF",frag=0)/Raw(tcp_hdr+b1[:16])
+                                f2=make_ip(target,ttl,tos,6,ip_id=ip_id,flags="MF",frag=1)/Raw(b2[8:24])
+                                f3=make_ip(target,ttl,tos,6,ip_id=ip_id,flags=0,   frag=2)/Raw(b2[16:32])
+                                send_frags([f1,f2,f3], f"TCP-{olabel}")
+            else:
+                print("\n  [4A-TCP-OVERLAP] SKIPPED (enable_tcp_payload_overlap=False or payload_layer!=l4)")
+
+        else:
+            # ── Non-fragment: IP plain payload sweep ─────────────────
+            # Matrix: payload_pattern_names × payload_size_list × whitelist_protocols
+            if _do_ip_plain_payload:
+                print("\n  [4A-IP-PLAIN: IP protocol plain payload sweep]")
+                print(f"  patterns={payload_pattern_names} × sizes={payload_size_list}")
+                for pname in payload_pattern_names:
+                    for size in payload_size_list:
+                        pay = gen_payload(pname, size)
+                        for pnum,proto_name in whitelist_protocols.items():
+                            for ttl in ttl_list:
+                                for tos in tos_list:
+                                    for ip_id in get_ip_id():
+                                        id_tag = f"id={hex(ip_id)}" if ip_id else "id=auto"
+                                        print(f"\n  [IP-Plain|{proto_name}|{pname}|{size}B|TTL={ttl}|ToS={hex(tos)}|{id_tag}]")
+                                        print_header()
+                                        pkt = make_ip(target,ttl,tos,pnum,ip_id=ip_id)/Raw(pay)
+                                        send_pkt(pnum,f"{proto_name}-{pname}-{size}B","ip-plain","-",pkt)
+            else:
+                print("\n  [4A-IP-PLAIN] SKIPPED (enable_ip_plain_payload=False or payload_layer!=ip)")
+
+            # ── Non-fragment: TCP plain payload sweep ────────────────
+            # Matrix: payload_pattern_names × payload_size_list
+            if _do_tcp_plain_payload:
+                print("\n  [4A-TCP-PLAIN: TCP payload plain sweep]")
+                print(f"  patterns={payload_pattern_names} × sizes={payload_size_list}")
+                for pname in payload_pattern_names:
+                    for size in payload_size_list:
+                        pay = gen_payload(pname, size)
+                        for ttl in ttl_list:
+                            for tos in tos_list:
+                                for ip_id in get_ip_id():
+                                    id_tag = f"id={hex(ip_id)}" if ip_id else "id=auto"
+                                    print(f"\n  [TCP-Plain|{pname}|{size}B|TTL={ttl}|ToS={hex(tos)}|{id_tag}]")
+                                    print_header()
+                                    pkt = make_ip(target,ttl,tos,6,ip_id=ip_id)/\
+                                          TCP(sport=1234,dport=80,flags="S")/Raw(pay)
+                                    send_pkt(6,f"TCP-{pname}-{size}B","tcp-plain","-",pkt)
+            else:
+                print("\n  [4A-TCP-PLAIN] SKIPPED (enable_tcp_plain_payload=False)")
+
+    # ================================================================
+    #  SECTION 4B: PROTOCOL OVERLAP
+    #  OS send order decides which proto field reassembler uses
+    # ================================================================
+    if not enable_proto_overlap:
+        skip("SECTION 4B: PROTOCOL OVERLAP", "enable_proto_overlap=False")
+    else:
+        print("\n" + "="*100)
+        print(f"  SECTION 4B: PROTOCOL OVERLAP — {len(proto_overlap_pairs)} pairs (whitelist x forged)")
+        print("  Fragment mode  → OS order decides which proto field wins at reassembly")
+        print("  NoFragment mode→ plain sweep per whitelist_protocols (auto)")
+        print("="*100)
+        for plabel,(p1,p1n,p2,p2n) in proto_overlap_pairs.items():
+            for ttl in ttl_list:
+                for tos in tos_list:
+                    for ip_id in get_ip_id():
+                        id_tag = f"id={hex(ip_id)}" if ip_id else "id=auto"
+                        print(f"\n  [{plabel}|F1={p1n}({p1})|F2={p2n}({p2})|TTL={ttl}|{id_tag}]")
+                        print_header()
+                        b1,b2=b"\x41"*48,b"\x42"*48
 
                         if not _frag_enabled:
-                            # NoFragment: auto use whitelist_protocols + both ports as plain
+                            # NoFragment: auto use whitelist_protocols for plain packets
                             for pnum,pname in whitelist_protocols.items():
-                                ph1=build_l4_hdr(pnum,dport=dp1)
-                                ph2=build_l4_hdr(pnum,dport=dp2)
-                                pkt1=make_ip(target,ttl,tos,pnum,ip_id=ip_id)/Raw(ph1)
-                                pkt2=make_ip(target,ttl,tos,pnum,ip_id=ip_id)/Raw(ph2)
-                                send_pkt(pnum,f"{pname}-dp{dp1}","nofrag-p1","-",pkt1)
-                                send_pkt(pnum,f"{pname}-dp{dp2}","nofrag-p2","-",pkt2)
+                                pkt=make_ip(target,ttl,tos,pnum,ip_id=ip_id)/Raw(b1[:32])
+                                send_pkt(pnum,f"{plabel}-{pname}-plain","nofrag-plain","-",pkt)
                         else:
-                            f1=make_ip(target,ttl,tos,proto_num,ip_id=ip_id,flags="MF",frag=0)/Raw(h1)
-                            f2=make_ip(target,ttl,tos,proto_num,ip_id=ip_id,flags=0,   frag=0)/Raw(h2)
-                            send_frags([f1,f2], f"{proto_name}-{portlabel}")
+                            f1=make_ip(target,ttl,tos,p1,ip_id=ip_id,flags="MF",frag=0)/Raw(b1[:16])
+                            f2=make_ip(target,ttl,tos,p2,ip_id=ip_id,flags="MF",frag=1)/Raw(b2[8:24])
+                            f3=make_ip(target,ttl,tos,p2,ip_id=ip_id,flags=0,   frag=2)/Raw(b2[16:32])
+                            send_frags([f1,f2,f3], plabel)
 
-# Section 5 removed — IP options merged into Section 1 (1-2 plain / 1-B fragment)
+    # ================================================================
+    #  SECTION 4C: PORT OVERLAP
+    #  OS send order decides which dport reassembler uses
+    # ================================================================
+    if not enable_port_overlap:
+        skip("SECTION 4C: PORT OVERLAP", "enable_port_overlap=False")
+    elif not _l4_layer:
+        skip("SECTION 4C: PORT OVERLAP", "payload_layer='ip' — port overlap needs L4 layer")
+    else:
+        # Build port_transport_list if not already set (NoFragment path)
+        if 'port_transport_list' not in dir():
+            _wl_port2 = {k:v for k,v in whitelist_protocols.items() if k != 1}
+            if port_overlap_transport == "all":
+                port_transport_list = list(_wl_port2.items())
+            else:
+                port_transport_list = [(k,v) for k,v in _wl_port2.items()
+                                       if v == port_overlap_transport]
+            if port_overlap_pairs is None:
+                port_overlap_pairs = {}
+                for wp,fp in product(whitelist_ports, forged_ports):
+                    port_overlap_pairs[f"p{wp}_vs_p{fp}"] = (wp,fp)
+
+        print("\n" + "="*100)
+        print(f"  SECTION 4C: PORT OVERLAP — {len(port_overlap_pairs)} pairs | transport={port_overlap_transport}")
+        print("  Fragment mode  → OS order decides which dport wins at reassembly")
+        print("  NoFragment mode→ plain packet per whitelist_protocols with each port pair (auto)")
+        print(f"  whitelist_ports={whitelist_ports}")
+        print(f"  forged_ports   ={forged_ports}")
+        print("="*100)
+        for proto_num,proto_name in port_transport_list:
+            for portlabel,(dp1,dp2) in port_overlap_pairs.items():
+                for ttl in ttl_list:
+                    for tos in tos_list:
+                        for ip_id in get_ip_id():
+                            id_tag = f"id={hex(ip_id)}" if ip_id else "id=auto"
+                            print(f"\n  [{proto_name}|{portlabel}|F1.dp={dp1}|F2.dp={dp2}|TTL={ttl}|{id_tag}]")
+                            print_header()
+                            h1=build_l4_hdr(proto_num,dport=dp1)
+                            h2=build_l4_hdr(proto_num,dport=dp2)
+
+                            if not _frag_enabled:
+                                # NoFragment: auto use whitelist_protocols + both ports as plain
+                                for pnum,pname in whitelist_protocols.items():
+                                    ph1=build_l4_hdr(pnum,dport=dp1)
+                                    ph2=build_l4_hdr(pnum,dport=dp2)
+                                    pkt1=make_ip(target,ttl,tos,pnum,ip_id=ip_id)/Raw(ph1)
+                                    pkt2=make_ip(target,ttl,tos,pnum,ip_id=ip_id)/Raw(ph2)
+                                    send_pkt(pnum,f"{pname}-dp{dp1}","nofrag-p1","-",pkt1)
+                                    send_pkt(pnum,f"{pname}-dp{dp2}","nofrag-p2","-",pkt2)
+                            else:
+                                f1=make_ip(target,ttl,tos,proto_num,ip_id=ip_id,flags="MF",frag=0)/Raw(h1)
+                                f2=make_ip(target,ttl,tos,proto_num,ip_id=ip_id,flags=0,   frag=0)/Raw(h2)
+                                send_frags([f1,f2], f"{proto_name}-{portlabel}")
+
+    # Section 5 removed — IP options merged into Section 1 (1-2 plain / 1-B fragment)
 
 # ================================================================
 #  COMBINATION TEST MODE
